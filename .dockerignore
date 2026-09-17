@@ -1,0 +1,22 @@
+# .gitignore must stay in the context: hatchling reads it to exclude src/airflow_os/www/dist from
+# the package, so that the wheel force-include is the only copy (otherwise: duplicate-path error).
+.git
+.ruff_cache
+.venv
+**/__pycache__
+*.py[cod]
+*.egg-info
+build
+dist
+logs
+airflow.db*
+airflow.cfg
+docs
+ui/node_modules
+ui/.pnpm-store
+ui/dist
+ui/coverage
+src/airflow_os/www/dist
+.DS_Store
+.idea
+.vscode

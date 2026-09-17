@@ -1,0 +1,24 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+dist/
+build/
+
+# Node
+node_modules/
+ui/dist/
+src/airflow_os/www/dist/
+
+# Airflow
+logs/
+airflow.db*
+airflow.cfg
+standalone_admin_password.txt
+simple_auth_manager_passwords.json.generated
+
+# Editors / OS
+.DS_Store
+.idea/
+.vscode/

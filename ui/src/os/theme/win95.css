@@ -1,0 +1,1296 @@
+/*
+ * Airflow OS - Windows 95 design system.
+ *
+ * Everything is scoped under .aos so the host Airflow UI's Chakra reset cannot
+ * leak in (and so our aggressive resets cannot leak out). The bevels use the
+ * canonical four-layer inset box-shadow rather than borders, which keeps the
+ * 1px highlight/shadow crisp at any zoom.
+ */
+
+.aos {
+  --face: #c0c0c0;
+  --face-light: #dfdfdf;
+  --white: #ffffff;
+  --shadow: #808080;
+  --dark: #0a0a0a;
+  --navy: #000080;
+  --navy-fade: #1084d0;
+  --navy-inactive: #808080;
+  --navy-inactive-fade: #b5b5b5;
+  --teal: #008080;
+  --text: #000000;
+  --text-disabled: #808080;
+  --selection: #000080;
+  --selection-text: #ffffff;
+  --link: #0000ff;
+
+  /* Airflow state palette, dithered down to something Win95-plausible. */
+  --st-success: #008000;
+  --st-failed: #a80000;
+  --st-running: #00a2e8;
+  --st-queued: #808000;
+  --st-deferred: #6a3ea1;
+  --st-skipped: #b06000;
+  --st-none: #606060;
+
+  --border-raised:
+    inset -1px -1px var(--dark), inset 1px 1px var(--white),
+    inset -2px -2px var(--shadow), inset 2px 2px var(--face-light);
+  --border-sunken:
+    inset -1px -1px var(--white), inset 1px 1px var(--dark),
+    inset -2px -2px var(--face-light), inset 2px 2px var(--shadow);
+  --border-field:
+    inset -1px -1px var(--face-light), inset 1px 1px var(--shadow),
+    inset -2px -2px var(--white), inset 2px 2px var(--dark);
+  --border-thin-raised: inset -1px -1px var(--shadow), inset 1px 1px var(--white);
+  --border-thin-sunken: inset -1px -1px var(--white), inset 1px 1px var(--shadow);
+
+  --taskbar-h: 28px;
+  --title-h: 18px;
+
+  /* The host renders a react plugin into a plain flex child with no positioning
+     context, so the desktop must fill that box rather than absolutely positioning
+     itself - `inset: 0` would resolve against the viewport and slide under the nav.
+     min-height keeps it visible if the host's height chain ever collapses. */
+  position: relative;
+  width: 100%;
+  height: 100%;
+  min-height: 420px;
+  overflow: hidden;
+
+  font-family: "MS Sans Serif", "Microsoft Sans Serif", Tahoma, Geneva, Verdana, sans-serif;
+  font-size: 11px;
+  line-height: 1.2;
+  color: var(--text);
+  -webkit-font-smoothing: none;
+  -moz-osx-font-smoothing: unset;
+  font-smooth: never;
+  text-rendering: optimizeSpeed;
+}
+
+.aos *,
+.aos *::before,
+.aos *::after {
+  box-sizing: border-box;
+}
+
+.aos button,
+.aos input,
+.aos select,
+.aos textarea {
+  font-family: inherit;
+  font-size: inherit;
+  color: inherit;
+}
+
+/* ---------------------------------------------------------------- desktop -- */
+
+.aos-desktop {
+  position: absolute;
+  inset: 0;
+  overflow: hidden;
+  background: var(--teal);
+  user-select: none;
+  cursor: default;
+}
+
+/* The 50% dither Windows used before it could afford gradients. */
+.aos-desktop::before {
+  content: "";
+  position: absolute;
+  inset: 0;
+  pointer-events: none;
+  opacity: 0.06;
+  background-image: linear-gradient(45deg, #000 25%, transparent 25%, transparent 75%, #000 75%),
+    linear-gradient(45deg, #000 25%, transparent 25%, transparent 75%, #000 75%);
+  background-size: 4px 4px;
+  background-position: 0 0, 2px 2px;
+}
+
+.aos-desktop-icons {
+  position: absolute;
+  inset: 0 0 var(--taskbar-h) 0;
+  /* Icons place themselves absolutely on a grid, so this is only a coordinate
+     space - no flow layout, or dragging would fight it. */
+}
+
+.aos-desktop-icon {
+  position: absolute;
+  width: 76px;
+  padding: 4px 2px 5px;
+  touch-action: none;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 3px;
+  background: none;
+  border: 1px dotted transparent;
+  cursor: default;
+  text-align: center;
+}
+
+.aos-desktop-icon span {
+  color: var(--white);
+  padding: 1px 2px;
+  text-shadow: 1px 1px 0 rgb(0 0 0 / 60%);
+  word-break: break-word;
+}
+
+.aos-desktop-icon[data-selected="true"] span {
+  background: var(--navy);
+  text-shadow: none;
+}
+
+.aos-desktop-icon[data-selected="true"] {
+  border-color: #ffffff80;
+}
+
+.aos-desktop-icon[data-selected="true"] .aos-icon {
+  filter: drop-shadow(0 0 0 var(--navy));
+}
+
+/* ---------------------------------------------------------------- windows -- */
+
+.aos-window {
+  position: absolute;
+  display: flex;
+  flex-direction: column;
+  min-width: 160px;
+  min-height: 80px;
+  padding: 3px;
+  background: var(--face);
+  box-shadow: var(--border-raised);
+}
+
+.aos-window[data-dragging="true"],
+.aos-window[data-resizing="true"] {
+  /* Suppress text selection and pointer noise while a drag is in flight. */
+  user-select: none;
+}
+
+.aos-titlebar {
+  display: flex;
+  align-items: center;
+  gap: 3px;
+  height: var(--title-h);
+  padding: 0 2px 0 3px;
+  background: linear-gradient(90deg, var(--navy), var(--navy-fade));
+  color: var(--white);
+  font-weight: bold;
+  cursor: default;
+  flex: none;
+}
+
+.aos-window[data-active="false"] .aos-titlebar {
+  background: linear-gradient(90deg, var(--navy-inactive), var(--navy-inactive-fade));
+  color: var(--face-light);
+}
+
+.aos-titlebar-text {
+  flex: 1;
+  overflow: hidden;
+  white-space: nowrap;
+  text-overflow: ellipsis;
+  letter-spacing: 0;
+}
+
+.aos-titlebar-buttons {
+  display: flex;
+  gap: 2px;
+}
+
+.aos-titlebar-btn {
+  width: 16px;
+  height: 14px;
+  display: grid;
+  place-items: center;
+  padding: 0;
+  border: none;
+  background: var(--face);
+  box-shadow: var(--border-raised);
+  cursor: default;
+}
+
+.aos-titlebar-btn:active {
+  box-shadow: var(--border-sunken);
+}
+
+.aos-titlebar-btn:active > * {
+  transform: translate(1px, 1px);
+}
+
+.aos-window-body {
+  flex: 1;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+  margin-top: 2px;
+  overflow: hidden;
+}
+
+.aos-resize-handle {
+  position: absolute;
+  right: 0;
+  bottom: 0;
+  width: 14px;
+  height: 14px;
+  cursor: nwse-resize;
+}
+
+/* ------------------------------------------------------------------- menu -- */
+
+.aos-menubar {
+  display: flex;
+  flex: none;
+  padding: 1px 0 2px;
+  gap: 0;
+}
+
+.aos-menubar > button {
+  padding: 1px 6px 2px;
+  border: none;
+  background: none;
+  cursor: default;
+}
+
+.aos-menubar > button[data-open="true"],
+.aos-menubar > button:hover {
+  background: var(--navy);
+  color: var(--white);
+}
+
+.aos-menu {
+  position: absolute;
+  z-index: 9000;
+  min-width: 130px;
+  padding: 2px;
+  background: var(--face);
+  box-shadow: var(--border-raised), 2px 2px 3px rgb(0 0 0 / 30%);
+}
+
+.aos-menu-item {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  width: 100%;
+  padding: 3px 18px 3px 8px;
+  border: none;
+  background: none;
+  text-align: left;
+  cursor: default;
+  white-space: nowrap;
+}
+
+.aos-menu-item:hover:not(:disabled) {
+  background: var(--navy);
+  color: var(--white);
+}
+
+.aos-menu-item:disabled {
+  color: var(--text-disabled);
+  text-shadow: 1px 1px 0 var(--white);
+}
+
+.aos-menu-item .aos-menu-accel {
+  margin-left: auto;
+  padding-left: 16px;
+  opacity: 0.9;
+}
+
+.aos-menu-sep {
+  height: 0;
+  margin: 3px 2px;
+  box-shadow: var(--border-thin-sunken);
+  border: none;
+}
+
+/* --------------------------------------------------------------- controls -- */
+
+.aos-btn {
+  min-width: 68px;
+  min-height: 21px;
+  padding: 3px 10px 4px;
+  border: none;
+  background: var(--face);
+  box-shadow: var(--border-raised);
+  cursor: default;
+}
+
+.aos-btn:active:not(:disabled),
+.aos-btn[data-pressed="true"] {
+  box-shadow: var(--border-sunken);
+  padding: 4px 9px 3px 11px;
+}
+
+.aos-btn:disabled {
+  color: var(--text-disabled);
+  text-shadow: 1px 1px 0 var(--white);
+}
+
+.aos-btn:focus-visible {
+  outline: 1px dotted var(--dark);
+  outline-offset: -4px;
+}
+
+.aos-btn-sm {
+  min-width: 0;
+  min-height: 0;
+  padding: 2px 6px 3px;
+}
+
+.aos-field {
+  padding: 3px 4px;
+  border: none;
+  background: var(--white);
+  box-shadow: var(--border-field);
+}
+
+.aos-field:disabled {
+  background: var(--face);
+  color: var(--text-disabled);
+}
+
+.aos-panel {
+  background: var(--face);
+  box-shadow: var(--border-raised);
+}
+
+.aos-well {
+  background: var(--white);
+  box-shadow: var(--border-field);
+}
+
+.aos-sunken {
+  box-shadow: var(--border-sunken);
+}
+
+.aos-groupbox {
+  position: relative;
+  padding: 12px 8px 8px;
+  margin-top: 6px;
+  box-shadow: var(--border-thin-sunken);
+}
+
+.aos-groupbox > legend {
+  position: absolute;
+  top: -6px;
+  left: 6px;
+  padding: 0 3px;
+  background: var(--face);
+}
+
+/* ------------------------------------------------------------------- tabs -- */
+
+.aos-tabs {
+  display: flex;
+  flex-direction: column;
+  flex: 1;
+  min-height: 0;
+}
+
+.aos-tabstrip {
+  display: flex;
+  gap: 1px;
+  padding-left: 2px;
+  position: relative;
+  z-index: 1;
+}
+
+.aos-tab {
+  padding: 3px 9px 4px;
+  border: none;
+  background: var(--face);
+  box-shadow: var(--border-thin-raised);
+  border-radius: 3px 3px 0 0;
+  cursor: default;
+  margin-bottom: -1px;
+}
+
+.aos-tab[data-active="true"] {
+  padding: 4px 11px 5px;
+  margin: -2px -2px -1px -2px;
+  font-weight: normal;
+  z-index: 2;
+}
+
+.aos-tabpanel {
+  flex: 1;
+  min-height: 0;
+  padding: 8px;
+  background: var(--face);
+  box-shadow: var(--border-thin-raised);
+  display: flex;
+  flex-direction: column;
+}
+
+/* --------------------------------------------------------------- listview -- */
+
+.aos-listview {
+  flex: 1;
+  min-height: 0;
+  overflow: auto;
+  background: var(--white);
+  box-shadow: var(--border-field);
+}
+
+.aos-table {
+  width: 100%;
+  border-collapse: separate;
+  border-spacing: 0;
+  background: var(--white);
+}
+
+.aos-table thead th {
+  position: sticky;
+  top: 0;
+  z-index: 2;
+  padding: 2px 6px 3px;
+  text-align: left;
+  font-weight: normal;
+  background: var(--face);
+  box-shadow: var(--border-thin-raised);
+  cursor: default;
+  white-space: nowrap;
+}
+
+.aos-table thead th[data-sortable="true"]:active {
+  box-shadow: var(--border-thin-sunken);
+}
+
+.aos-table thead th .aos-sort {
+  margin-left: 4px;
+  font-size: 9px;
+}
+
+.aos-table tbody td {
+  padding: 1px 6px 2px;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  max-width: 320px;
+}
+
+.aos-table tbody tr[data-selected="true"] {
+  background: var(--selection);
+  color: var(--selection-text);
+}
+
+.aos-table tbody tr[data-selected="true"] .aos-state-dot {
+  outline: 1px solid var(--white);
+}
+
+.aos-table .aos-num {
+  text-align: right;
+  font-variant-numeric: tabular-nums;
+}
+
+/* ------------------------------------------------------------ status bars -- */
+
+.aos-statusbar {
+  display: flex;
+  gap: 2px;
+  flex: none;
+  margin-top: 2px;
+}
+
+.aos-statusbar > div {
+  padding: 2px 5px 3px;
+  box-shadow: var(--border-thin-sunken);
+  overflow: hidden;
+  white-space: nowrap;
+  text-overflow: ellipsis;
+}
+
+.aos-statusbar > div:first-child {
+  flex: 1;
+}
+
+/* ----------------------------------------------------------------- gauges -- */
+
+.aos-progress {
+  height: 18px;
+  padding: 2px;
+  background: var(--face);
+  box-shadow: var(--border-sunken);
+}
+
+.aos-progress-fill {
+  height: 100%;
+  background: repeating-linear-gradient(
+    90deg,
+    var(--navy) 0 8px,
+    transparent 8px 10px
+  );
+  background-size: 10px 100%;
+}
+
+.aos-meter {
+  width: 44px;
+  height: 44px;
+  padding: 2px;
+  background: #000;
+  box-shadow: var(--border-sunken);
+  position: relative;
+  overflow: hidden;
+}
+
+.aos-meter-fill {
+  position: absolute;
+  left: 2px;
+  right: 2px;
+  bottom: 2px;
+  background: repeating-linear-gradient(
+    0deg,
+    #00ff00 0 3px,
+    #000 3px 4px
+  );
+}
+
+.aos-graph {
+  background: #000;
+  box-shadow: var(--border-sunken);
+  position: relative;
+  overflow: hidden;
+}
+
+/* --------------------------------------------------------------- taskbar -- */
+
+.aos-taskbar {
+  position: absolute;
+  left: 0;
+  right: 0;
+  bottom: 0;
+  height: var(--taskbar-h);
+  display: flex;
+  align-items: center;
+  gap: 3px;
+  padding: 2px;
+  background: var(--face);
+  box-shadow: inset 0 1px var(--white), inset 0 2px var(--face-light);
+  z-index: 8000;
+}
+
+.aos-start-btn {
+  display: flex;
+  align-items: center;
+  gap: 3px;
+  height: 22px;
+  padding: 0 5px 0 3px;
+  border: none;
+  font-weight: bold;
+  background: var(--face);
+  box-shadow: var(--border-raised);
+  cursor: default;
+  flex: none;
+}
+
+.aos-start-btn[data-open="true"] {
+  box-shadow: var(--border-sunken);
+}
+
+.aos-start-btn[data-open="true"] > * {
+  transform: translate(1px, 1px);
+}
+
+.aos-taskbar-div {
+  width: 0;
+  height: 20px;
+  box-shadow: var(--border-thin-sunken);
+  margin: 0 1px;
+  flex: none;
+}
+
+.aos-taskbar-items {
+  flex: 1;
+  display: flex;
+  gap: 3px;
+  overflow: hidden;
+}
+
+.aos-taskbar-item {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  min-width: 0;
+  max-width: 160px;
+  flex: 1 1 120px;
+  height: 22px;
+  padding: 0 6px;
+  border: none;
+  background: var(--face);
+  box-shadow: var(--border-raised);
+  cursor: default;
+  text-align: left;
+}
+
+.aos-taskbar-item[data-active="true"] {
+  box-shadow: var(--border-sunken);
+  background-image: linear-gradient(45deg, #ffffff40 25%, transparent 25%, transparent 75%, #ffffff40 75%);
+  background-size: 4px 4px;
+  font-weight: bold;
+}
+
+.aos-taskbar-item[data-active="true"] > * {
+  transform: translate(1px, 1px);
+}
+
+.aos-taskbar-item span {
+  overflow: hidden;
+  white-space: nowrap;
+  text-overflow: ellipsis;
+}
+
+.aos-tray {
+  display: flex;
+  align-items: center;
+  gap: 5px;
+  height: 22px;
+  padding: 0 6px;
+  box-shadow: var(--border-thin-sunken);
+  flex: none;
+}
+
+.aos-tray-clock {
+  font-variant-numeric: tabular-nums;
+}
+
+/* ------------------------------------------------------------- start menu -- */
+
+.aos-startmenu {
+  position: absolute;
+  bottom: var(--taskbar-h);
+  left: 2px;
+  z-index: 8500;
+  display: flex;
+  padding: 3px;
+  background: var(--face);
+  box-shadow: var(--border-raised);
+}
+
+.aos-startmenu-banner {
+  width: 22px;
+  flex: none;
+  margin-right: 3px;
+  background: linear-gradient(0deg, var(--navy), #3a3a9c);
+  color: var(--face-light);
+  writing-mode: vertical-rl;
+  transform: rotate(180deg);
+  font-size: 15px;
+  font-weight: bold;
+  letter-spacing: 1px;
+  text-align: right;
+  padding: 6px 3px;
+}
+
+.aos-startmenu-items {
+  width: 190px;
+  display: flex;
+  flex-direction: column;
+}
+
+.aos-startmenu-item {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  padding: 5px 6px;
+  border: none;
+  background: none;
+  text-align: left;
+  cursor: default;
+}
+
+.aos-startmenu-item:hover {
+  background: var(--navy);
+  color: var(--white);
+}
+
+.aos-startmenu-item .aos-submenu-arrow {
+  margin-left: auto;
+}
+
+/* ---------------------------------------------------------------- dialogs -- */
+
+.aos-modal-layer {
+  position: absolute;
+  inset: 0;
+  z-index: 9500;
+  pointer-events: none;
+}
+
+.aos-modal-layer > * {
+  pointer-events: auto;
+}
+
+.aos-dialog-body {
+  display: flex;
+  gap: 12px;
+  padding: 14px 12px 10px;
+}
+
+.aos-dialog-text {
+  flex: 1;
+  line-height: 1.45;
+  user-select: text;
+}
+
+.aos-dialog-buttons {
+  display: flex;
+  justify-content: center;
+  gap: 7px;
+  padding: 4px 12px 12px;
+}
+
+/* ------------------------------------------------------------------- misc -- */
+
+.aos-state-dot {
+  display: inline-block;
+  width: 7px;
+  height: 7px;
+  margin-right: 5px;
+  vertical-align: baseline;
+  outline: 1px solid transparent;
+}
+
+.aos-mono {
+  font-family: "Lucida Console", "Courier New", monospace;
+  font-size: 11px;
+}
+
+.aos-scroll {
+  overflow: auto;
+}
+
+.aos-row {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.aos-col {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.aos-grow {
+  flex: 1;
+  min-height: 0;
+  min-width: 0;
+}
+
+.aos-icon {
+  display: block;
+  flex: none;
+  image-rendering: pixelated;
+  shape-rendering: crispEdges;
+}
+
+/* Scrollbars, as close as a browser will allow. */
+.aos ::-webkit-scrollbar {
+  width: 16px;
+  height: 16px;
+}
+
+.aos ::-webkit-scrollbar-track {
+  background-color: var(--face);
+  background-image: linear-gradient(45deg, #ffffff80 25%, transparent 25%, transparent 75%, #ffffff80 75%);
+  background-size: 2px 2px;
+}
+
+.aos ::-webkit-scrollbar-thumb {
+  background: var(--face);
+  box-shadow: var(--border-raised);
+}
+
+.aos ::-webkit-scrollbar-corner {
+  background: var(--face);
+}
+
+.aos {
+  scrollbar-color: var(--face) var(--face-light);
+}
+
+/* -------------------------------------------------------------------- bsod -- */
+
+.aos-bsod {
+  position: absolute;
+  inset: 0;
+  z-index: 10000;
+  background: #0000aa;
+  color: #ffffff;
+  font-family: "Lucida Console", "Courier New", monospace;
+  font-size: 14px;
+  line-height: 1.5;
+  padding: 8% 12%;
+  cursor: default;
+  user-select: text;
+}
+
+.aos-bsod-title {
+  background: #aaaaaa;
+  color: #0000aa;
+  display: inline-block;
+  padding: 0 8px;
+  margin-bottom: 22px;
+}
+
+.aos-bsod pre {
+  white-space: pre-wrap;
+  margin: 0;
+  font: inherit;
+}
+
+/* -------------------------------------------------------------------- boot -- */
+
+.aos-boot {
+  position: absolute;
+  inset: 0;
+  z-index: 9900;
+  background: #000;
+  color: #c0c0c0;
+  font-family: "Lucida Console", "Courier New", monospace;
+  font-size: 13px;
+  line-height: 1.45;
+  padding: 24px 28px;
+  overflow: hidden;
+  cursor: default;
+}
+
+.aos-boot pre {
+  margin: 0;
+  font: inherit;
+  white-space: pre-wrap;
+}
+
+.aos-boot-cursor::after {
+  content: "_";
+  animation: aos-blink 1s steps(1) infinite;
+}
+
+@keyframes aos-blink {
+  50% { opacity: 0; }
+}
+
+/* ----------------------------------------------------------------- clippy -- */
+
+.aos-clippy {
+  position: absolute;
+  right: 14px;
+  bottom: calc(var(--taskbar-h) + 12px);
+  z-index: 8200;
+  display: flex;
+  align-items: flex-end;
+  gap: 6px;
+  pointer-events: none;
+}
+
+.aos-clippy > * {
+  pointer-events: auto;
+}
+
+.aos-clippy-balloon {
+  position: relative;
+  width: 268px;
+  padding: 9px 11px;
+  /* The assistant balloon was the one thing in Windows that was not grey. */
+  background: #ffffe1;
+  color: #000;
+  box-shadow: inset -1px -1px #808080, inset 1px 1px #fff, 2px 2px 4px rgb(0 0 0 / 35%);
+  border: 1px solid #000;
+  border-radius: 3px;
+  animation: aos-clippy-in 140ms ease-out;
+}
+
+/* The tail, drawn as two stacked triangles so the 1px border reads through. */
+.aos-clippy-balloon::after,
+.aos-clippy-balloon::before {
+  content: "";
+  position: absolute;
+  right: -9px;
+  bottom: 16px;
+  width: 0;
+  height: 0;
+  border-top: 6px solid transparent;
+  border-bottom: 6px solid transparent;
+  border-left: 9px solid #000;
+}
+
+.aos-clippy-balloon::after {
+  right: -7px;
+  border-left-color: #ffffe1;
+}
+
+@keyframes aos-clippy-in {
+  from { opacity: 0; transform: translateY(6px) scale(0.96); }
+  to { opacity: 1; transform: none; }
+}
+
+.aos-clippy-headline {
+  font-weight: bold;
+  margin-bottom: 5px;
+}
+
+.aos-clippy-section {
+  margin-top: 7px;
+}
+
+.aos-clippy-label {
+  color: #606060;
+}
+
+.aos-clippy-actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: 5px;
+  margin-top: 10px;
+}
+
+.aos-clippy-scroll {
+  max-height: 260px;
+  overflow-y: auto;
+  user-select: text;
+}
+
+.aos-clippy-figure {
+  background: none;
+  border: none;
+  padding: 0;
+  cursor: default;
+  animation: aos-clippy-bob 3.2s ease-in-out infinite;
+}
+
+@keyframes aos-clippy-bob {
+  0%, 100% { transform: translateY(0); }
+  50% { transform: translateY(-3px); }
+}
+
+/* Clippy blinks. Of course he blinks. */
+.aos-clippy-pupil {
+  transform-box: fill-box;
+  transform-origin: center;
+  animation: aos-clippy-blink 4.4s infinite;
+}
+
+@keyframes aos-clippy-blink {
+  0%, 92%, 100% { transform: scaleY(1); }
+  95% { transform: scaleY(0.1); }
+}
+
+.aos-clippy-thinking {
+  display: inline-block;
+  width: 1.4em;
+  text-align: left;
+}
+
+.aos-clippy-thinking::after {
+  content: "";
+  animation: aos-clippy-dots 1.2s steps(4) infinite;
+}
+
+@keyframes aos-clippy-dots {
+  0% { content: ""; }
+  25% { content: "."; }
+  50% { content: ".."; }
+  75% { content: "..."; }
+}
+
+/* ---------------------------------------------------------------- badges -- */
+
+/*
+ * Windows 95 had no notification badges - it had tray icons. This is a modern idea
+ * given period dress: a hard-edged chip with a 1px black keyline and a bevel, so it
+ * reads as an unread count without looking like it came from a phone.
+ */
+.aos-badge {
+  position: absolute;
+  top: 0;
+  right: 2px;
+  min-width: 15px;
+  height: 14px;
+  padding: 0 3px;
+  display: grid;
+  place-items: center;
+  background: #c00000;
+  color: var(--white);
+  font-weight: bold;
+  font-size: 10px;
+  line-height: 1;
+  border: 1px solid var(--dark);
+  box-shadow: inset 1px 1px #ff6060, inset -1px -1px #700000;
+  pointer-events: none;
+}
+
+.aos-tray-badge {
+  display: flex;
+  align-items: center;
+  gap: 3px;
+  padding: 0 3px;
+  border: none;
+  background: none;
+  cursor: default;
+  font-weight: bold;
+}
+
+.aos-tray-badge[data-pending="true"] {
+  color: #c00000;
+}
+
+/* The tray icon nags gently while something is waiting. */
+.aos-tray-badge[data-pending="true"] .aos-icon {
+  animation: aos-nag 2.2s ease-in-out infinite;
+}
+
+@keyframes aos-nag {
+  0%, 78%, 100% { transform: none; }
+  84% { transform: translateY(-2px); }
+  90% { transform: translateY(0); }
+}
+
+/* -------------------------------------------------------------- winhelp -- */
+
+.aos-help {
+  flex: 1;
+  min-height: 0;
+  display: flex;
+  gap: 3px;
+}
+
+.aos-help-contents {
+  width: 220px;
+  flex: none;
+  overflow: auto;
+  padding: 3px;
+  background: var(--white);
+  box-shadow: var(--border-field);
+}
+
+.aos-help-book,
+.aos-help-page {
+  display: flex;
+  align-items: center;
+  gap: 5px;
+  width: 100%;
+  padding: 2px 4px;
+  border: none;
+  background: none;
+  text-align: left;
+  cursor: default;
+  white-space: nowrap;
+  overflow: hidden;
+}
+
+.aos-help-page {
+  padding-left: 20px;
+}
+
+.aos-help-book span,
+.aos-help-page span {
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.aos-help-book[data-selected="true"],
+.aos-help-page[data-selected="true"] {
+  background: var(--selection);
+  color: var(--selection-text);
+}
+
+.aos-help-topic {
+  flex: 1;
+  min-width: 0;
+  overflow: auto;
+  padding: 12px 14px;
+  background: var(--white);
+  box-shadow: var(--border-field);
+  user-select: text;
+  cursor: auto;
+}
+
+/* WinHelp topics were denser than the rest of Windows, and always left-aligned. */
+.aos-help-h {
+  font-weight: bold;
+  margin: 12px 0 6px;
+}
+
+.aos-help-topic > .aos-help-h:first-child {
+  margin-top: 0;
+}
+
+.aos-help-p {
+  margin: 0 0 9px;
+  line-height: 1.55;
+}
+
+.aos-help-list {
+  margin: 0 0 9px;
+  padding-left: 22px;
+  line-height: 1.55;
+}
+
+.aos-help-pre {
+  margin: 0 0 10px;
+  padding: 7px 9px;
+  background: var(--face);
+  box-shadow: var(--border-thin-sunken);
+  overflow-x: auto;
+  white-space: pre;
+}
+
+.aos-help-welcome {
+  max-width: 460px;
+}
+
+/* -------------------------------------------------------------- boot splash -- */
+
+/*
+ * Windows 95 booted into a photograph of clouds. This does the same thing with
+ * gradients: a sky, some soft cumulus, and the 50% dither over the top so it reads as
+ * a 256-colour bitmap rather than a modern gradient.
+ */
+.aos-splash {
+  position: absolute;
+  inset: 0;
+  z-index: 9800;
+  display: block;
+  border: none;
+  padding: 0;
+  margin: 0;
+  cursor: default;
+  overflow: hidden;
+  text-align: left;
+  font-family: inherit;
+  background: linear-gradient(180deg, #0a3d91 0%, #1a6fc4 45%, #6fb4e8 78%, #b9dcf5 100%);
+}
+
+.aos-splash-clouds {
+  position: absolute;
+  inset: 0;
+  pointer-events: none;
+  background-image:
+    radial-gradient(ellipse 44% 18% at 22% 74%, rgb(255 255 255 / 78%) 0%, transparent 70%),
+    radial-gradient(ellipse 30% 13% at 62% 84%, rgb(255 255 255 / 62%) 0%, transparent 72%),
+    radial-gradient(ellipse 26% 11% at 86% 68%, rgb(255 255 255 / 46%) 0%, transparent 74%),
+    radial-gradient(ellipse 34% 14% at 8% 34%, rgb(255 255 255 / 26%) 0%, transparent 76%);
+}
+
+/* The dither, so it looks like it came off a 1995 CD-ROM. */
+.aos-splash-clouds::after {
+  content: "";
+  position: absolute;
+  inset: 0;
+  opacity: 0.07;
+  background-image:
+    linear-gradient(45deg, #000 25%, transparent 25%, transparent 75%, #000 75%),
+    linear-gradient(45deg, #000 25%, transparent 25%, transparent 75%, #000 75%);
+  background-size: 4px 4px;
+  background-position: 0 0, 2px 2px;
+}
+
+/* Logo left, wordmark stacked beside it - the Win95 splash arrangement. */
+.aos-splash-plate {
+  position: absolute;
+  top: 50%;
+  left: 50%;
+  transform: translate(-50%, -58%);
+  display: flex;
+  align-items: center;
+  gap: 26px;
+}
+
+.aos-splash-logo {
+  flex: none;
+  animation: aos-spin 3.4s linear infinite;
+  filter: drop-shadow(2px 3px 6px rgb(0 0 0 / 35%));
+}
+
+@keyframes aos-spin {
+  to { transform: rotate(360deg); }
+}
+
+.aos-splash-words {
+  color: #fff;
+  text-shadow: 2px 2px 0 rgb(0 0 0 / 38%);
+}
+
+.aos-splash-small {
+  font-size: 22px;
+  font-weight: bold;
+  letter-spacing: 3px;
+  margin-bottom: -2px;
+}
+
+.aos-splash-big {
+  font-size: 62px;
+  font-weight: bold;
+  letter-spacing: -1px;
+  line-height: 1;
+}
+
+.aos-splash-footer {
+  position: absolute;
+  left: 34px;
+  right: 34px;
+  bottom: 26px;
+}
+
+.aos-splash-legal {
+  color: #eaf4ff;
+  font-size: 10px;
+  line-height: 1.5;
+  text-shadow: 1px 1px 0 rgb(0 0 0 / 30%);
+  margin-bottom: 10px;
+}
+
+/* Win95's boot bar was a thin sunken trough with a blue block sweeping across it. */
+.aos-splash-bar {
+  width: 216px;
+  height: 14px;
+  padding: 2px;
+  background: #b9c3cc;
+  box-shadow: var(--border-sunken);
+  overflow: hidden;
+}
+
+.aos-splash-bar-fill {
+  width: 42%;
+  height: 100%;
+  background: linear-gradient(90deg, #0a3d91, #2f8fdd, #0a3d91);
+  animation: aos-sweep 1.5s ease-in-out infinite;
+}
+
+@keyframes aos-sweep {
+  0% { transform: translateX(-105%); }
+  100% { transform: translateX(240%); }
+}
+
+/* Shown instead of the progress bar while we wait for the gesture the browser
+   demands before it will let anything make a sound. */
+.aos-splash-prompt {
+  height: 14px;
+  font-size: 12px;
+  font-weight: bold;
+  color: #fff;
+  text-shadow: 1px 1px 0 rgb(0 0 0 / 40%);
+  animation: aos-prompt-blink 1.4s steps(1) infinite;
+}
+
+@keyframes aos-prompt-blink {
+  50% { opacity: 0.35; }
+}
+
+.aos-splash-post {
+  margin-top: 8px;
+  font-family: "Lucida Console", "Courier New", monospace;
+  font-size: 11px;
+  color: #eaf4ff;
+  text-shadow: 1px 1px 0 rgb(0 0 0 / 30%);
+  min-height: 1.3em;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .aos-splash-logo,
+  .aos-splash-bar-fill,
+  .aos-splash-prompt {
+    animation: none;
+  }
+}

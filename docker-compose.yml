@@ -1,0 +1,48 @@
+# Airflow OS, isolated from any Airflow already installed on this machine.
+#
+#   docker compose up --build -d     # build + start;   http://localhost:28080  (admin / admin)
+#   docker compose logs -f           # follow the scheduler / api-server output
+#   docker compose down              # stop; state is kept in the airflow-os-data volume
+#   docker compose down -v           # stop and wipe the metadata db, logs and password
+#
+# Overridable from the shell or a .env file next to this file:
+#   AIRFLOW_OS_PORT            host port to publish on           (default 28080)
+#   AIRFLOW_OS_ADMIN_PASSWORD  admin password, used on first boot (default admin)
+#   AIRFLOW_OS_JWT_SECRET      api-server token signing key      (default: a fixed dev value)
+#   ANTHROPIC_API_KEY          if set, becomes the anthropic_default connection for Clippy
+#   AIRFLOW_OS_SEED_DEMO       seed 20 demo Variables, 33 Connections and 8 Pools on first boot (default true)
+#   AIRFLOW_IMAGE              base image, e.g. apache/airflow:3.3.1-python3.12
+
+services:
+  airflow-os:
+    build:
+      context: .
+      args:
+        AIRFLOW_IMAGE: ${AIRFLOW_IMAGE:-apache/airflow:3.3.1-python3.12}
+    image: airflow-os:local
+    container_name: airflow-os
+    ports:
+      # Host side only. Inside the container the api-server stays on 8080, so the Task
+      # Execution API that tasks call back to needs no reconfiguration.
+      - "${AIRFLOW_OS_PORT:-28080}:8080"
+    environment:
+      # Fixed so browser sessions survive `docker compose restart`. Dev value; change it
+      # if this box is ever reachable by anyone else.
+      AIRFLOW__API_AUTH__JWT_SECRET: ${AIRFLOW_OS_JWT_SECRET:-airflow-os-local-dev-secret-not-for-production}
+      AIRFLOW_OS_ADMIN_PASSWORD: ${AIRFLOW_OS_ADMIN_PASSWORD:-admin}
+      ANTHROPIC_API_KEY: ${ANTHROPIC_API_KEY:-}
+      AIRFLOW_OS_SEED_DEMO: ${AIRFLOW_OS_SEED_DEMO:-true}
+    volumes:
+      - airflow-os-data:/opt/airflow/data
+      # Live-edit the demo dags without rebuilding; the dag processor picks changes up.
+      - ./dags:/opt/airflow/dags
+    healthcheck:
+      test: ["CMD", "curl", "-fsS", "http://localhost:8080/api/v2/monitor/health"]
+      interval: 15s
+      timeout: 5s
+      retries: 20
+      start_period: 30s
+    restart: unless-stopped
+
+volumes:
+  airflow-os-data:

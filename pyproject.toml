@@ -1,0 +1,45 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "airflow-os"
+version = "0.1.0"
+description = "Airflow OS - a Windows 95 desktop shell for Apache Airflow 3.1+, shipped as a native plugin."
+readme = "README.md"
+license = { file = "LICENSE" }
+requires-python = ">=3.10"
+keywords = ["airflow", "plugin", "ui", "windows95", "react"]
+dependencies = [
+  "apache-airflow>=3.1.0",
+]
+
+[project.optional-dependencies]
+# Powers the Clippy assistant DAG (@task.llm failure triage).
+ai = ["apache-airflow-providers-common-ai>=1.0.0"]
+dev = ["pytest>=8", "ruff>=0.6"]
+
+[project.urls]
+Homepage = "https://github.com/roykoand/airflow-os-plugin"
+Source = "https://github.com/roykoand/airflow-os-plugin"
+
+# This is what makes Airflow pick the desktop up on api-server start.
+[project.entry-points."airflow.plugins"]
+airflow_os = "airflow_os.plugin:AirflowOSPlugin"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/airflow_os"]
+
+[tool.hatch.build.targets.wheel.force-include]
+"src/airflow_os/www/dist" = "airflow_os/www/dist"
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+markers = ["integration: needs a running Airflow OS (set AIRFLOW_OS_URL)"]
+
+[tool.ruff]
+line-length = 110
+target-version = "py310"
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "UP", "B", "C4"]
