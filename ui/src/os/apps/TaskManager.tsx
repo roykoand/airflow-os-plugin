@@ -1,6 +1,6 @@
 import { useMemo, useState } from "react";
 
-import { airflow, kernel } from "../api/client";
+import { PROCESS_LIMIT, airflow, kernel } from "../api/client";
 import type { ProcessRow } from "../api/types";
 import {
   Button,
@@ -324,7 +324,9 @@ function Processes() {
       </Toolbar>
       <StatusBar
         panes={[
-          `Processes: ${rows.length}`,
+          // A full page is the query's ceiling, not the real total, and the status bar
+          // is the one place that would otherwise state it as fact.
+          `Processes: ${rows.length}${rows.length >= PROCESS_LIMIT ? "+" : ""}`,
           `CPU Usage: ${(perf?.cpu_usage ?? 0).toFixed(0)}%`,
           `Mem Usage: ${perf?.mem_used_slots ?? 0}/${perf?.mem_total_slots ?? 0} slots`,
         ]}

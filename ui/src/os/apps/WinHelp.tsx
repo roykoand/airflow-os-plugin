@@ -44,7 +44,6 @@ export function WinHelp() {
     );
   }, [dagList, filter]);
 
-  // The open book's tasks, and the selected topic's documentation.
   const { data: tasks } = usePoll(() => (expanded === null ? Promise.resolve(null) : airflow.tasks(expanded)), {
     deps: [expanded],
     interval: 0,

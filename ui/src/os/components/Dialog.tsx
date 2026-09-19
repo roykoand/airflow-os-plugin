@@ -7,10 +7,16 @@ import { Button } from "./widgets";
 /** A Win95 message box. Modal in feel, but never blocks the rest of the desktop. */
 export function Dialog({ dialog }: { readonly dialog: DialogState }) {
   const desktop = useDesktop();
-  const primary = useRef<HTMLDivElement>(null);
+  const root = useRef<HTMLDivElement>(null);
 
   useEffect(() => {
-    primary.current?.querySelector<HTMLButtonElement>("[data-primary='true'] button")?.focus();
+    const restoreTo = document.activeElement;
+    root.current?.querySelector<HTMLButtonElement>("[data-primary='true'] button")?.focus();
+    // Answering a message box hands focus back to whatever raised it, rather than
+    // dropping it at the top of the document and stranding keyboard users.
+    return () => {
+      if (restoreTo instanceof HTMLElement && restoreTo.isConnected) restoreTo.focus();
+    };
   }, []);
 
   const answer = (value: string) => desktop.answerDialog(dialog.id, value);
@@ -20,8 +26,20 @@ export function Dialog({ dialog }: { readonly dialog: DialogState }) {
       className="aos-window"
       data-active="true"
       onKeyDown={(event) => {
-        if (event.key === "Escape") answer(dialog.buttons.at(-1)?.value ?? "cancel");
+        if (event.key === "Escape") {
+          answer(dialog.buttons.at(-1)?.value ?? "cancel");
+          return;
+        }
+        if (event.key !== "Tab") return;
+        // Tab cycles within the box. Without this it walks straight out into the
+        // desktop behind, which still looks modal but no longer behaves like it.
+        const stops = [...(root.current?.querySelectorAll<HTMLElement>("button:not([disabled])") ?? [])];
+        const edge = event.shiftKey ? stops[0] : stops.at(-1);
+        if (stops.length === 0 || document.activeElement !== edge) return;
+        event.preventDefault();
+        (event.shiftKey ? stops.at(-1) : stops[0])?.focus();
       }}
+      ref={root}
       role="dialog"
       style={{
         height: "auto",
@@ -66,7 +84,7 @@ export function Dialog({ dialog }: { readonly dialog: DialogState }) {
             ) : null}
           </div>
         </div>
-        <div className="aos-dialog-buttons" ref={primary}>
+        <div className="aos-dialog-buttons">
           {dialog.buttons.map((button) => (
             <span data-primary={button.primary ? "true" : undefined} key={button.value}>
               <Button onClick={() => answer(button.value)}>{button.label}</Button>

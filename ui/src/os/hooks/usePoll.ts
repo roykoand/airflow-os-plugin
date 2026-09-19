@@ -25,6 +25,7 @@ export function usePoll<T>(
   const [loading, setLoading] = useState(enabled);
   const [initial, setInitial] = useState(true);
   const [tick, setTick] = useState(0);
+  const [failures, setFailures] = useState(0);
 
   const fetcherRef = useRef(fetcher);
   fetcherRef.current = fetcher;
@@ -46,10 +47,12 @@ export function usePoll<T>(
         if (cancelled) return;
         setData(result);
         setError(undefined);
+        setFailures(0);
       })
       .catch((cause: unknown) => {
         if (cancelled) return;
         setError(cause instanceof Error ? cause : new Error(String(cause)));
+        setFailures((count) => count + 1);
       })
       .finally(() => {
         if (cancelled) return;
@@ -65,8 +68,27 @@ export function usePoll<T>(
 
   useEffect(() => {
     if (!enabled || interval <= 0) return undefined;
-    const timer = globalThis.setInterval(refresh, interval);
+    // Doubling per consecutive failure, capped at 8x: an api-server that is down (or
+    // a session that has expired) is not worth asking every two seconds, but recovery
+    // still has to be noticed without a reload.
+    const delay = interval * Math.min(2 ** failures, 8);
+    const timer = globalThis.setInterval(() => {
+      // A background tab polls nothing. Several desktops left open otherwise keep the
+      // api-server answering queries for views nobody is looking at.
+      if (!document.hidden) refresh();
+    }, delay);
     return () => globalThis.clearInterval(timer);
+  }, [enabled, interval, refresh, failures]);
+
+  // Coming back to the tab should show current data, not whatever was on screen when
+  // it was hidden, so the skipped polls are made up immediately rather than waited out.
+  useEffect(() => {
+    if (!enabled || interval <= 0) return undefined;
+    const onVisibility = () => {
+      if (!document.hidden) refresh();
+    };
+    document.addEventListener("visibilitychange", onVisibility);
+    return () => document.removeEventListener("visibilitychange", onVisibility);
   }, [enabled, interval, refresh]);
 
   return { data, error, initial, loading, refresh };

@@ -708,6 +708,54 @@
   margin-left: auto;
 }
 
+/* --------------------------------------------------------------- alt+tab -- */
+
+/* Above the dialogs, because in Windows the switcher is over everything that is
+   not the stop screen. */
+.aos-altTab {
+  position: absolute;
+  top: 50%;
+  left: 50%;
+  z-index: 9600;
+  transform: translate(-50%, -50%);
+  padding: 12px 12px 8px;
+  max-width: 460px;
+  background: var(--face);
+  box-shadow: var(--border-raised);
+  text-align: center;
+  user-select: none;
+}
+
+.aos-altTab-icons {
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: center;
+  gap: 2px;
+  margin-bottom: 6px;
+}
+
+.aos-altTab-icon {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 46px;
+  height: 46px;
+}
+
+/* Win95 marked the selection with a plain rectangle, not a fill. */
+.aos-altTab-icon[data-selected] {
+  outline: 2px solid var(--navy);
+  outline-offset: -2px;
+}
+
+.aos-altTab-title {
+  min-height: 15px;
+  padding-top: 2px;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
 /* ---------------------------------------------------------------- dialogs -- */
 
 .aos-modal-layer {

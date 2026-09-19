@@ -46,7 +46,8 @@ export function HitlInbox() {
   const requests = useMemo(() => data ?? [], [data]);
   const selected = requests.find((row) => row.ti_id === selectedId) ?? requests[0];
 
-  // Reset the form when the selection changes, seeding it from the request's params.
+  // Keyed on the id, not on `selected`: the 5s poll hands back a new object every
+  // time, and depending on that would wipe half-typed input on every refresh.
   useEffect(() => {
     if (!selected) return;
     setInputs(

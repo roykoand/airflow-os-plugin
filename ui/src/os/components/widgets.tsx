@@ -1,5 +1,6 @@
 import { useEffect, useRef, useState, type ReactNode } from "react";
 
+import { ApiError } from "../api/client";
 import { Icon } from "./Icon";
 
 /* Shared chrome used by the apps: buttons, tabs, tables, gauges, status bars. */
@@ -356,12 +357,25 @@ export function Toolbar({ children }: { readonly children: ReactNode }) {
 }
 
 export function ErrorNotice({ error }: { readonly error: Error }) {
+  const expired = error instanceof ApiError && error.expired;
+
   return (
     <div className="aos-row" style={{ alignItems: "flex-start", gap: 8, padding: 10 }}>
-      <Icon name="error" size={32} />
+      <Icon name={expired ? "warning" : "error"} size={32} />
       <div style={{ userSelect: "text" }}>
-        <div style={{ fontWeight: "bold", marginBottom: 4 }}>The operation could not be completed.</div>
-        <div>{error.message}</div>
+        <div style={{ fontWeight: "bold", marginBottom: 4 }}>
+          {expired ? "Your logon session has expired." : "The operation could not be completed."}
+        </div>
+        {expired ? (
+          <>
+            <div>Log on again to carry on. Anything on screen is as it was when the session ended.</div>
+            <div style={{ marginTop: 8 }}>
+              <Button onClick={() => globalThis.location.reload()}>Log On…</Button>
+            </div>
+          </>
+        ) : (
+          <div>{error.message}</div>
+        )}
       </div>
     </div>
   );

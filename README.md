@@ -387,9 +387,9 @@ allowed.
 ### No UI dependencies
 
 No React95, no styled-components, no component library, no icon set, no markdown
-library, no query library. The window manager, the 1,250 lines of Win95 CSS, the 34
+library, no query library. The window manager, the 1,298 lines of Win95 CSS, the 34
 pixel icons, the sound scheme and the Markdown renderer are all first-party — which
-keeps the dynamically-imported bundle at **157 kB** (45 kB gzipped) and avoids shipping
+keeps the dynamically-imported bundle at **160 kB** (46 kB gzipped) and avoids shipping
 a second CSS-in-JS runtime alongside the host's Emotion.
 
 The Markdown renderer emits React elements rather than an HTML string. That is a
@@ -397,29 +397,6 @@ security decision: `doc_md` is authored by whoever writes the dag, and injecting
 HTML would hand them a script tag in another user's Airflow session.
 
 ---
-
-## Known limitations
-
-Named rather than left to be discovered:
-
-- **No screenshots yet.** The README describes the desktop but does not show it; the
-  capture list is in [`docs/img/README.md`](docs/img/README.md).
-- **Thin tests.** Still missing: column-select portability, the log-tail exception
-  extraction, the FastAPI dependency wiring (the kernel is tested, the route
-  decorators are not), and the task transition sounds.
-- **Exercised against Airflow 3.3 and 3.4 only**, though `pyproject.toml` claims
-  `>=3.1`. The HITL model, `react_apps` and structured `error_detail` in logs all want
-  verifying against 3.1 and 3.2.
-- **`/processes` truncates at 500 rows** and the status bar reports the truncated count
-  as fact. Needs pagination.
-- **No 401 handling in the fetch wrapper.** When the api-server token expires, apps show
-  an error box instead of re-authenticating; a reload fixes it.
-- **Polling does not pause when the tab is hidden** and has no backoff. Several open
-  tabs mean steady load on the api-server.
-- **English only**, and it ignores the host's light/dark theme by design.
-- **Unusable below roughly 900px** — it is a fixed-pixel desktop.
-- **Keyboard access is poor**: no Alt+Tab, no focus trapping in dialogs.
-- The wheel's bundling of `www/dist` has only been exercised via editable installs.
 
 ## Licence
 

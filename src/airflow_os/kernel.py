@@ -74,6 +74,11 @@ _PRIORITY_BANDS: tuple[tuple[int, str], ...] = (
 
 _MAX_LOG_BYTES = 512 * 1024
 
+#: Ceiling on one process-table query. The desktop mirrors this as ``PROCESS_LIMIT``
+#: so it can say "500+" rather than reporting a truncated count as the total; move
+#: the two together.
+PROCESS_LIMIT = 500
+
 
 def synthetic_pid(dag_id: str, run_id: str, task_id: str, map_index: int) -> int:
     """Derive a stable, Win95-plausible PID for a task instance with no real one.
@@ -177,7 +182,7 @@ def list_processes(
         stmt = stmt.where(or_(TI.state.in_(LIVE_STATES), TI.end_date >= cutoff))
     else:
         stmt = stmt.where(TI.state.in_(LIVE_STATES))
-    stmt = stmt.order_by(TI.start_date.desc().nullslast(), TI.dag_id, TI.task_id).limit(500)
+    stmt = stmt.order_by(TI.start_date.desc().nullslast(), TI.dag_id, TI.task_id).limit(PROCESS_LIMIT)
 
     records = session.execute(stmt).all()
     means = _mean_durations(session, {(r.dag_id, r.task_id) for r in records})

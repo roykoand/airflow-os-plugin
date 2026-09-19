@@ -101,7 +101,6 @@ export function renderMarkdown(source: string): ReactNode {
   while (index < lines.length) {
     const line = lines[index] ?? "";
 
-    // Fenced code.
     if (line.trimStart().startsWith("```")) {
       flush();
       const body: string[] = [];

@@ -1,6 +1,7 @@
 import { useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 
 import { kernel } from "./api/client";
+import { AltTab } from "./components/AltTab";
 import { Clippy } from "./components/Clippy";
 import { BootSplash } from "./components/BootSplash";
 import { Bsod, crashFor, extractException } from "./components/Bsod";
@@ -124,7 +125,6 @@ function Desktop() {
     };
   }, []);
 
-
   const crash = desktop.state.crash;
 
   if (!desktop.state.booted) {
@@ -190,6 +190,8 @@ function Desktop() {
         </div>
 
         <Clippy />
+
+        <AltTab />
 
         <Taskbar
           deadlinesMissed={deadlinesMissed}

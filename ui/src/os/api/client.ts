@@ -38,6 +38,9 @@ export function basePath(): string {
 const KERNEL_PREFIX = "/airflow-os";
 const API_PREFIX = "/api/v2";
 
+/** Mirrors the kernel's `PROCESS_LIMIT`: a full page means the list was cut short. */
+export const PROCESS_LIMIT = 500;
+
 export class ApiError extends Error {
   public readonly status: number;
 
@@ -48,6 +51,17 @@ export class ApiError extends Error {
     this.name = "ApiError";
     this.status = status;
     this.detail = detail;
+  }
+
+  /**
+   * The api-server's `_token` cookie has expired. Nothing the desktop can retry will
+   * help - the token is minted by the login flow, which lives outside the plugin - so
+   * callers offer a way back to it rather than another refresh. 403 is deliberately
+   * not included: that is an authorised session being told no by the access checks,
+   * and logging on again would not change the answer.
+   */
+  public get expired(): boolean {
+    return this.status === 401;
   }
 }
 
