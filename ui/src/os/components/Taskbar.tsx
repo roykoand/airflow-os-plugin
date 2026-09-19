@@ -38,12 +38,16 @@ export function StartFlag({ size = 16 }: { readonly size?: number }) {
 }
 
 export function Taskbar({
+  deadlinesMissed,
   hitlPending,
+  onDeadlinesClick,
   onHitlClick,
   onTrayClick,
   schedulerAlive,
 }: {
+  readonly deadlinesMissed: number;
   readonly hitlPending: number;
+  readonly onDeadlinesClick: () => void;
   readonly onHitlClick: () => void;
   readonly onTrayClick: () => void;
   readonly schedulerAlive: boolean | undefined;
@@ -98,6 +102,18 @@ export function Taskbar({
             >
               <Icon name="question" size={14} />
               <span>{hitlPending}</span>
+            </button>
+          ) : null}
+          {deadlinesMissed > 0 ? (
+            <button
+              className="aos-tray-badge"
+              data-pending="true"
+              onClick={onDeadlinesClick}
+              title={`${deadlinesMissed} missed deadline${deadlinesMissed === 1 ? "" : "s"}`}
+              type="button"
+            >
+              <Icon name="mailbox-full" size={14} />
+              <span>{deadlinesMissed}</span>
             </button>
           ) : null}
           <button

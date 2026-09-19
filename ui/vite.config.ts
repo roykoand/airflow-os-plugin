@@ -4,7 +4,6 @@ import cssInjectedByJsPlugin from "vite-plugin-css-injected-by-js";
 import dts from "vite-plugin-dts";
 import { defineConfig } from "vitest/config";
 
-// https://vitejs.dev/config/
 export default defineConfig(({ command, mode }) => {
   const isLibraryBuild = command === 'build';
   const isTest = mode === "test";
@@ -31,7 +30,6 @@ export default defineConfig(({ command, mode }) => {
         },
       },
     } : {
-      // Development build configuration
       chunkSizeWarningLimit: 1600
     },
     define: {
@@ -41,8 +39,8 @@ export default defineConfig(({ command, mode }) => {
       __AOS_BUILD__: JSON.stringify(new Date().toISOString().replace("T", " ").slice(0, 19)),
       global: "globalThis",
       "process.env": "{}",
-      // Define process.env for browser compatibility. Not under vitest: React's
-      // jsx-dev-runtime exports nothing in production, and tests compile to jsxDEV.
+      // Not under vitest: React's jsx-dev-runtime exports nothing in production, and
+      // tests compile to jsxDEV.
       ...(isTest ? {} : { "process.env.NODE_ENV": JSON.stringify("production") }),
     },
     plugins: [

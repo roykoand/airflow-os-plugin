@@ -33,10 +33,8 @@ COPY --chown=airflow:root src /opt/airflow-os/src
 COPY --from=ui --chown=airflow:root /build/ui/dist /opt/airflow-os/src/airflow_os/www/dist
 
 # A real (non-editable) install, so the wheel's force-include of www/dist is exercised.
-# The Common AI provider powers the Clippy dag; it is installed by name rather than via
-# the `ai` extra because pyproject pins >=1.0.0 and PyPI has not reached 1.0 yet. The
-# provider ships pydantic-ai-slim without model clients, so the Anthropic one is added
-# for Clippy's default `anthropic:` model string.
+# The Common AI provider powers the Clippy dag. It ships pydantic-ai-slim without model
+# clients, so the Anthropic one is added for Clippy's default `anthropic:` model string.
 RUN pip install --no-cache-dir "/opt/airflow-os[dev]" \
       apache-airflow-providers-common-ai \
       "pydantic-ai-slim[anthropic]"

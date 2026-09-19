@@ -16,7 +16,7 @@ dependencies = [
 
 [project.optional-dependencies]
 # Powers the Clippy assistant DAG (@task.llm failure triage).
-ai = ["apache-airflow-providers-common-ai>=1.0.0"]
+ai = ["apache-airflow-providers-common-ai>=0.9.0"]
 dev = ["pytest>=8", "ruff>=0.6"]
 
 [project.urls]

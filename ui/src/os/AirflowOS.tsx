@@ -67,6 +67,13 @@ function Desktop() {
 
   const hitlPending = useHitlWatch(desktop);
 
+  // A missed deadline is unread mail, not an interrupt: it badges but never plays a
+  // sound or opens the mailbox, so a plain poll rather than a watcher like HITL's.
+  const { data: missed } = usePoll(() => kernel.deadlines(true), { interval: 30_000 });
+  const deadlinesMissed = missed?.length ?? 0;
+
+  const badges: Record<string, number> = { deadlines: deadlinesMissed, hitl: hitlPending };
+
   useTaskTransitions({
     onFailed: async (rows) => {
       sound.play("chord");
@@ -152,7 +159,7 @@ function Desktop() {
         <div className="aos-desktop-icons">
           {shortcuts.map((shortcut) => (
             <DesktopIcon
-              badge={shortcut.id === "hitl" ? hitlPending : undefined}
+              badge={badges[shortcut.id]}
               icons={icons}
               id={shortcut.id}
               key={shortcut.id}
@@ -185,7 +192,9 @@ function Desktop() {
         <Clippy />
 
         <Taskbar
+          deadlinesMissed={deadlinesMissed}
           hitlPending={hitlPending}
+          onDeadlinesClick={() => desktop.openApp("deadlines", {}, { singleton: true })}
           onHitlClick={() => desktop.openApp("hitl", {}, { singleton: true })}
           onTrayClick={() => desktop.openApp("sysprops", {}, { singleton: true })}
           schedulerAlive={system?.scheduler_alive}

@@ -387,10 +387,10 @@ allowed.
 ### No UI dependencies
 
 No React95, no styled-components, no component library, no icon set, no markdown
-library, no query library. The window manager, the 1,296 lines of Win95 CSS, the 34
+library, no query library. The window manager, the 1,250 lines of Win95 CSS, the 34
 pixel icons, the sound scheme and the Markdown renderer are all first-party — which
-keeps the dynamically-imported bundle at **128 kB** and avoids shipping a second
-CSS-in-JS runtime alongside the host's Emotion.
+keeps the dynamically-imported bundle at **157 kB** (45 kB gzipped) and avoids shipping
+a second CSS-in-JS runtime alongside the host's Emotion.
 
 The Markdown renderer emits React elements rather than an HTML string. That is a
 security decision: `doc_md` is authored by whoever writes the dag, and injecting it as

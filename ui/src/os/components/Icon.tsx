@@ -709,6 +709,3 @@ export const Icon = memo(function Icon({
     </svg>
   );
 });
-
-/** Every icon key the shell can render, for the registry's type-safety. */
-export const ICON_NAMES = Object.keys(ALL);

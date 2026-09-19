@@ -840,37 +840,6 @@
   font: inherit;
 }
 
-/* -------------------------------------------------------------------- boot -- */
-
-.aos-boot {
-  position: absolute;
-  inset: 0;
-  z-index: 9900;
-  background: #000;
-  color: #c0c0c0;
-  font-family: "Lucida Console", "Courier New", monospace;
-  font-size: 13px;
-  line-height: 1.45;
-  padding: 24px 28px;
-  overflow: hidden;
-  cursor: default;
-}
-
-.aos-boot pre {
-  margin: 0;
-  font: inherit;
-  white-space: pre-wrap;
-}
-
-.aos-boot-cursor::after {
-  content: "_";
-  animation: aos-blink 1s steps(1) infinite;
-}
-
-@keyframes aos-blink {
-  50% { opacity: 0; }
-}
-
 /* ----------------------------------------------------------------- clippy -- */
 
 .aos-clippy {
@@ -1261,21 +1230,6 @@
 @keyframes aos-sweep {
   0% { transform: translateX(-105%); }
   100% { transform: translateX(240%); }
-}
-
-/* Shown instead of the progress bar while we wait for the gesture the browser
-   demands before it will let anything make a sound. */
-.aos-splash-prompt {
-  height: 14px;
-  font-size: 12px;
-  font-weight: bold;
-  color: #fff;
-  text-shadow: 1px 1px 0 rgb(0 0 0 / 40%);
-  animation: aos-prompt-blink 1.4s steps(1) infinite;
-}
-
-@keyframes aos-prompt-blink {
-  50% { opacity: 0.35; }
 }
 
 .aos-splash-post {

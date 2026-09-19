@@ -239,23 +239,3 @@ export interface HitlRequest {
   chosen_options: string[] | null;
 }
 
-export interface HitlDetail {
-  ti_id: string;
-  subject: string;
-  body: string | null;
-  options: string[];
-  defaults: string[] | null;
-  multiple: boolean;
-  params: Record<string, unknown> | null;
-  responded_at: string | null;
-  chosen_options: string[] | null;
-  params_input: Record<string, unknown> | null;
-  response_received: boolean;
-  user_id: string | null;
-  task_instance?: TaskInstance;
-}
-
-export interface Paginated<T> {
-  total_entries: number;
-  [key: string]: T[] | number;
-}

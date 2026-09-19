@@ -67,15 +67,6 @@ export function Field({
   );
 }
 
-export function GroupBox({ children, label }: { readonly label: string; readonly children: ReactNode }) {
-  return (
-    <fieldset className="aos-groupbox">
-      <legend>{label}</legend>
-      {children}
-    </fieldset>
-  );
-}
-
 export function Tabs({
   active,
   children,
