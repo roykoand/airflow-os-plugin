@@ -1,6 +1,6 @@
 <div align="center">
 
-<img src="docs/img/pinwheel.svg" width="110" alt="">
+<img src="docs/img/pinwheel.svg" width="156" alt="">
 
 # Airflow OS
 
