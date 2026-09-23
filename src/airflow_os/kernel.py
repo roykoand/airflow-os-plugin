@@ -25,22 +25,20 @@ import platform
 import sys
 import zlib
 from datetime import datetime, timedelta, timezone
-from types import SimpleNamespace
 from typing import Any
 
 from airflow.configuration import conf
-from airflow.models.connection import Connection
-from airflow.models.dag import DagModel
+
+# The only ORM left. Deadlines have no REST API, so the mailbox reads their tables, and
+# needs ``dag_run`` alongside to say which run each deadline was measured against.
 from airflow.models.dagrun import DagRun
-from airflow.models.pool import Pool
-from airflow.models.taskinstance import TaskInstance as TI
-from airflow.models.variable import Variable
-from airflow.models.xcom import XComModel
-from airflow.utils.state import DagRunState, TaskInstanceState
-from sqlalchemy import func, or_, select
+from airflow.utils.state import TaskInstanceState
+from fastapi import HTTPException
+from sqlalchemy import or_, select
 from sqlalchemy.orm import Session
 
 from airflow_os import __version__ as AIRFLOW_OS_VERSION
+from airflow_os.rest import ANY, Rest
 from airflow_os.schemas import (
     FsEntry,
     FsFile,
@@ -80,6 +78,25 @@ _MAX_LOG_BYTES = 512 * 1024
 PROCESS_LIMIT = 500
 
 
+def _dt(value: Any) -> datetime | None:
+    """A timestamp from a JSON payload.
+
+    The REST API renders datetimes as RFC 3339 with a ``Z``, which
+    ``datetime.fromisoformat`` only learned to parse in Python 3.11; the project still
+    supports 3.10, so the suffix is normalised first. Anything unparseable becomes
+    ``None`` rather than raising: a missing date greys out one column, a traceback
+    takes down the window.
+    """
+    if not value:
+        return None
+    if isinstance(value, datetime):
+        return value
+    try:
+        return datetime.fromisoformat(str(value).replace("Z", "+00:00"))
+    except ValueError:
+        return None
+
+
 def synthetic_pid(dag_id: str, run_id: str, task_id: str, map_index: int) -> int:
     """Derive a stable, Win95-plausible PID for a task instance with no real one.
 
@@ -114,167 +131,250 @@ def _image_name(task_id: str, map_index: int) -> str:
     return f"{stem}.exe"
 
 
-def _mean_durations(session: Session, keys: set[tuple[str, str]]) -> dict[tuple[str, str], float]:
-    """Mean historical duration per (dag_id, task_id), used to estimate progress.
+def _count(client: Rest, path: str, **params: Any) -> int:
+    """How many rows match, without fetching them.
 
-    This is what powers the CPU column: a task 30 seconds into a job that normally
-    takes 60 reads as 50%. Tasks with no history report 0 rather than a guess.
+    Every list response carries ``total_entries``, so a page of one answers a counting
+    question for the price of the smallest possible response. This is what replaced the
+    ``SELECT count(*)`` behind the Performance tab.
+    """
+    return int(client.get(path, limit=1, **params).get("total_entries") or 0)
+
+
+def _live_states() -> list[str]:
+    return [state.value for state in LIVE_STATES]
+
+
+def _dag_index(client: Rest) -> dict[str, dict]:
+    """Every dag, by id, including the stale ones.
+
+    The task instance schema carries no owner, so the process table's Owner column is
+    filled from here. Listing dags is cheap next to listing their task instances, and
+    one lookup table serves the whole page.
+    """
+    return {
+        row["dag_id"]: row
+        for row in client.rows("/dags", "dags", exclude_stale=False, max_rows=2000)
+    }
+
+
+def _mean_durations(client: Rest, keys: set[tuple[str, str]]) -> dict[tuple[str, str], float]:
+    """Mean duration per (dag_id, task_id), used to estimate progress.
+
+    This is what powers the CPU column: a task 30 seconds into a job that normally takes
+    60 reads as 50%. Tasks with no history report 0 rather than a guess.
+
+    Where this used to be one ``AVG ... GROUP BY`` across all of history, it is now the
+    mean of the most recent successful runs the API will return in one page. That is a
+    deliberate trade and arguably the better statistic: a task whose runtime changed last
+    week is described by what it does now, not by what it did in March.
     """
     if not keys:
         return {}
     dag_ids = {dag_id for dag_id, _ in keys}
-    task_ids = {task_id for _, task_id in keys}
-    rows = session.execute(
-        select(TI.dag_id, TI.task_id, func.avg(TI.duration))
-        .where(
-            TI.dag_id.in_(dag_ids),
-            TI.task_id.in_(task_ids),
-            TI.duration.isnot(None),
-            TI.state == TaskInstanceState.SUCCESS,
+    totals: dict[tuple[str, str], list[float]] = {}
+    for dag_id in dag_ids:
+        rows = client.rows(
+            f"/dags/{dag_id}/dagRuns/{ANY}/taskInstances",
+            "task_instances",
+            state="success",
+            order_by="-start_date",
+            max_rows=200,
         )
-        .group_by(TI.dag_id, TI.task_id)
-    ).all()
-    return {(d, t): float(avg) for d, t, avg in rows if avg}
+        for row in rows:
+            key = (row.get("dag_id"), row.get("task_id"))
+            duration = row.get("duration")
+            if key in keys and duration:
+                totals.setdefault(key, []).append(float(duration))
+    return {key: sum(values) / len(values) for key, values in totals.items() if values}
 
 
-def list_processes(
-    session: Session, *, include_finished: bool = False, allowed_dags: set[str] | None = None
-) -> list[ProcessRow]:
+def list_processes(client: Rest, *, include_finished: bool = False) -> list[ProcessRow]:
     """Build the Task Manager process table from live task instances.
 
-    Selects explicit columns rather than the ``TaskInstance`` entity: the ORM model
-    grows columns between minor releases (and eagerly joins ``dag_run``), so entity
-    loads break against any metadata DB that is a migration behind. The desktop only
-    needs these eighteen fields.
+    ``~`` stands in for both the dag and the dag run, which is what lets one request ask
+    the deployment-wide question -- every in-flight task instance, whoever owns it.
+
+    "Show all processes" needs live *or* recently exited, and the API ands its filters
+    rather than oring them, so that is two requests merged on task instance id.
     """
     now = datetime.now(tz=timezone.utc)
+    path = f"/dags/{ANY}/dagRuns/{ANY}/taskInstances"
 
-    columns = (
-        TI.id,
-        TI.dag_id,
-        TI.run_id,
-        TI.task_id,
-        TI.map_index,
-        TI.state,
-        TI.start_date,
-        TI.end_date,
-        TI.try_number,
-        TI.max_tries,
-        TI.hostname,
-        TI.pool,
-        TI.pool_slots,
-        TI.queue,
-        TI.priority_weight,
-        TI.operator,
-        TI.pid,
-        TI.executor,
-        TI.task_display_name,
-    )
-    stmt = select(*columns, DagModel.owners).join(
-        DagModel, DagModel.dag_id == TI.dag_id, isouter=True
-    )
-    if allowed_dags is not None:
-        stmt = stmt.where(TI.dag_id.in_(allowed_dags))
+    records: dict[str, dict] = {}
+    for row in client.rows(
+        path, "task_instances", state=_live_states(), order_by="-start_date", max_rows=PROCESS_LIMIT
+    ):
+        records[row["id"]] = row
+
     if include_finished:
-        # "Show all processes" -> also surface what recently exited, like a process
-        # list that keeps zombies around briefly.
-        cutoff = now - timedelta(hours=6)
-        stmt = stmt.where(or_(TI.state.in_(LIVE_STATES), TI.end_date >= cutoff))
-    else:
-        stmt = stmt.where(TI.state.in_(LIVE_STATES))
-    stmt = stmt.order_by(TI.start_date.desc().nullslast(), TI.dag_id, TI.task_id).limit(PROCESS_LIMIT)
+        # A process list that keeps its zombies around briefly.
+        cutoff = (now - timedelta(hours=6)).isoformat()
+        for row in client.rows(
+            path,
+            "task_instances",
+            end_date_gte=cutoff,
+            order_by="-start_date",
+            max_rows=PROCESS_LIMIT,
+        ):
+            records.setdefault(row["id"], row)
 
-    records = session.execute(stmt).all()
-    means = _mean_durations(session, {(r.dag_id, r.task_id) for r in records})
+    found = list(records.values())[:PROCESS_LIMIT]
+    dags = _dag_index(client)
+    means = _mean_durations(client, {(r["dag_id"], r["task_id"]) for r in found})
 
     rows: list[ProcessRow] = []
-    for r in records:
-        if r.start_date is not None:
-            reference = r.end_date or now
-            elapsed = max((reference - r.start_date).total_seconds(), 0.0)
+    for r in found:
+        dag_id, task_id = r["dag_id"], r["task_id"]
+        map_index = r.get("map_index", -1)
+        run_id = r.get("dag_run_id") or ""
+        state = r.get("state")
+        start_date, end_date = _dt(r.get("start_date")), _dt(r.get("end_date"))
+
+        if start_date is not None:
+            elapsed = max(((end_date or now) - start_date).total_seconds(), 0.0)
         else:
             elapsed = 0.0
 
-        mean = means.get((r.dag_id, r.task_id))
-        if mean and r.state == TaskInstanceState.RUNNING:
-            cpu = min(elapsed / mean * 100.0, 100.0)
-        else:
-            cpu = 0.0
+        mean = means.get((dag_id, task_id))
+        cpu = min(elapsed / mean * 100.0, 100.0) if mean and state == "running" else 0.0
+
+        pid = r.get("pid")
+        owners = (dags.get(dag_id, {}).get("owners") or []) or ["airflow"]
+        pool_slots = r.get("pool_slots") or 1
 
         rows.append(
             ProcessRow(
-                ti_id=str(r.id),
-                pid=r.pid or synthetic_pid(r.dag_id, r.run_id, r.task_id, r.map_index),
-                synthetic_pid=r.pid is None,
-                image_name=_image_name(r.task_id, r.map_index),
-                dag_id=r.dag_id,
-                run_id=r.run_id,
-                task_id=r.task_id,
-                map_index=r.map_index,
-                display_name=r.task_display_name or r.task_id,
-                owner=(r.owners or "airflow").split(",")[0].strip() or "airflow",
-                state=str(r.state) if r.state else "none",
+                ti_id=str(r["id"]),
+                pid=pid or synthetic_pid(dag_id, run_id, task_id, map_index),
+                synthetic_pid=pid is None,
+                image_name=_image_name(task_id, map_index),
+                dag_id=dag_id,
+                run_id=run_id,
+                task_id=task_id,
+                map_index=map_index,
+                display_name=r.get("task_display_name") or task_id,
+                owner=str(owners[0]).strip() or "airflow",
+                state=str(state) if state else "none",
                 cpu=round(cpu, 1),
                 elapsed=round(elapsed, 1),
-                mem_k=(r.pool_slots or 1) * 1024,
-                try_number=r.try_number or 0,
-                max_tries=r.max_tries or 0,
-                priority=_priority_class(r.priority_weight),
-                priority_weight=r.priority_weight or 0,
-                pool=r.pool or "default_pool",
-                pool_slots=r.pool_slots or 1,
-                operator=r.operator,
-                hostname=r.hostname or None,
-                queue=r.queue,
-                executor=r.executor,
-                start_date=r.start_date,
-                end_date=r.end_date,
-                is_deferred=r.state == TaskInstanceState.DEFERRED,
+                mem_k=pool_slots * 1024,
+                try_number=r.get("try_number") or 0,
+                max_tries=r.get("max_tries") or 0,
+                priority=_priority_class(r.get("priority_weight")),
+                priority_weight=r.get("priority_weight") or 0,
+                pool=r.get("pool") or "default_pool",
+                pool_slots=pool_slots,
+                operator=r.get("operator"),
+                hostname=r.get("hostname") or None,
+                queue=r.get("queue"),
+                executor=r.get("executor"),
+                start_date=start_date,
+                end_date=end_date,
+                is_deferred=state == "deferred",
             )
         )
     return rows
 
 
-def performance(session: Session) -> PerformanceInfo:
-    """Task Manager 'Performance' tab: parallelism as CPU, pool slots as memory."""
+def authorized_dag_ids(client: Rest) -> set[str]:
+    """The dag ids this caller may read.
+
+    ``/api/v2/dags`` returns what the caller is allowed to see and nothing else, so the
+    listing *is* the allow-list. This used to be ``get_authorized_dag_ids(user)`` against
+    the metadata database; asking the API instead means the answer comes from the same
+    place every other read is already checked against, and cannot disagree with it.
+    """
+    return set(_dag_index(client))
+
+
+def find_process(client: Rest, ti_id: str) -> dict | None:
+    """Resolve a Task Manager row back to its task instance.
+
+    Task instances are addressed over REST by dag, run, task and map index, but the
+    desktop holds a row's identity as ``TaskInstance.id`` -- deliberately, because
+    synthetic PIDs collide and must never be resolvable. So the id is matched against the
+    same set the process table was built from: live first, then what recently exited.
+    A process the desktop could not have listed is one it cannot end.
+    """
+    path = f"/dags/{ANY}/dagRuns/{ANY}/taskInstances"
+    windows = (
+        {"state": _live_states()},
+        {"end_date_gte": (datetime.now(tz=timezone.utc) - timedelta(hours=6)).isoformat()},
+    )
+    for params in windows:
+        for row in client.rows(path, "task_instances", max_rows=PROCESS_LIMIT, **params):
+            if str(row.get("id")) == ti_id:
+                return row
+    return None
+
+
+def end_process(client: Rest, row: dict) -> str | None:
+    """Fail one task instance, and only that one.
+
+    ``include_downstream`` is off, so nothing cascades: Windows 95 did not ask permission
+    either. Airflow's own patch endpoint does the state change, which means the dag run
+    bookkeeping and the audit entry are its, not ours.
+    """
+    previous = row.get("state")
+    client.patch(
+        _ti_path(row["dag_id"], row["dag_run_id"], row["task_id"], row.get("map_index", -1)),
+        {
+            "new_state": "failed",
+            "include_downstream": False,
+            "include_upstream": False,
+            "include_future": False,
+            "include_past": False,
+        },
+        update_mask="new_state",
+    )
+    return str(previous) if previous else None
+
+
+def purge_dag(client: Rest, dag_id: str) -> None:
+    """'Empty Recycle Bin' for one dag: drop the record and everything hanging off it.
+
+    Refuses anything still live. A dag whose file is present is not in the bin, and
+    deleting its history because the desktop asked would be indefensible.
+    """
+    dag = _get_dag(client, dag_id)
+    if not dag:
+        raise FileNotFoundError(dag_id)
+    if not dag.get("is_stale"):
+        raise PermissionError(f"{dag_id} is not in the Recycle Bin - its file is still present.")
+    client.delete(f"/dags/{dag_id}")
+
+
+def performance(client: Rest) -> PerformanceInfo:
+    """Task Manager 'Performance' tab: parallelism as CPU, pool slots as memory.
+
+    Counted rather than fetched. Each number is the ``total_entries`` of a filtered
+    listing asked for one row, so the tab costs a handful of tiny responses instead of
+    the whole task instance table.
+    """
     parallelism = conf.getint("core", "parallelism", fallback=32) or 32
+    tis = f"/dags/{ANY}/dagRuns/{ANY}/taskInstances"
 
-    state_counts = dict(
-        session.execute(
-            select(TI.state, func.count()).where(TI.state.in_(LIVE_STATES)).group_by(TI.state)
-        ).all()
-    )
-    running = int(state_counts.get(TaskInstanceState.RUNNING, 0))
-    queued = int(state_counts.get(TaskInstanceState.QUEUED, 0)) + int(
-        state_counts.get(TaskInstanceState.SCHEDULED, 0)
-    )
-    deferred = int(state_counts.get(TaskInstanceState.DEFERRED, 0))
-    processes = sum(int(v) for v in state_counts.values())
+    running = _count(client, tis, state="running")
+    queued = _count(client, tis, state=["queued", "scheduled"])
+    deferred = _count(client, tis, state="deferred")
+    processes = _count(client, tis, state=_live_states())
+    handles = _count(client, tis)
+    running_dag_runs = _count(client, f"/dags/{ANY}/dagRuns", state="running")
 
-    # Pools are Airflow's memory: a bounded resource tasks allocate from.
-    total_slots = int(session.scalar(select(func.coalesce(func.sum(Pool.slots), 0))) or 0)
-    used_slots = int(
-        session.scalar(
-            select(func.coalesce(func.sum(TI.pool_slots), 0)).where(
-                TI.state.in_((TaskInstanceState.RUNNING, TaskInstanceState.QUEUED))
-            )
-        )
-        or 0
-    )
+    # Pools are Airflow's memory: a bounded resource tasks allocate from. The pool
+    # listing already reports its own occupancy, which used to be a GROUP BY here.
+    pools = client.rows("/pools", "pools")
+    total_slots = sum(int(pool.get("slots") or 0) for pool in pools)
+    used_slots = sum(int(pool.get("occupied_slots") or 0) for pool in pools)
 
-    running_dag_runs = int(
-        session.scalar(select(func.count()).select_from(DagRun).where(DagRun.state == DagRunState.RUNNING))
-        or 0
-    )
-    handles = int(session.scalar(select(func.count()).select_from(TI)) or 0)
-    threads = int(
-        session.scalar(
-            select(func.count(func.distinct(TI.hostname))).where(
-                TI.state == TaskInstanceState.RUNNING, TI.hostname.isnot(None)
-            )
-        )
-        or 0
-    )
+    # Distinct hosts running work. This one genuinely needs the rows, but only the
+    # running ones, which is the smallest of the live sets.
+    hosts = {
+        row.get("hostname")
+        for row in client.rows(tis, "task_instances", state="running", max_rows=PROCESS_LIMIT)
+        if row.get("hostname")
+    }
 
     return PerformanceInfo(
         cpu_usage=round(min(running / parallelism * 100.0, 100.0), 1) if parallelism else 0.0,
@@ -287,7 +387,7 @@ def performance(session: Session) -> PerformanceInfo:
         deferred=deferred,
         running_dag_runs=running_dag_runs,
         handles=handles,
-        threads=max(threads, running),
+        threads=max(len(hosts), running),
         processes=processes,
     )
 
@@ -305,43 +405,37 @@ def _bundle_built() -> str | None:
         return None
 
 
-def system_info(session: Session) -> SystemInfo:
+def system_info(client: Rest) -> SystemInfo:
     """The 'System Properties' dialog.
 
     Deployment settings are withheld unless ``[api] expose_config`` allows it, so the
     desktop cannot be used to read configuration the core API would refuse to show.
     """
-    from airflow.jobs.job import Job
-
     expose_config = conf.getboolean("api", "expose_config", fallback=False)
     hidden = "< hidden >"
 
-    scheduler = session.scalars(
-        select(Job).where(Job.job_type == "SchedulerJob").order_by(Job.latest_heartbeat.desc()).limit(1)
-    ).first()
+    # A live scheduler if there is one, otherwise the most recent corpse, so the dialog
+    # can say "not responding" with a last-seen time rather than showing nothing.
+    jobs = client.get(
+        "/jobs", job_type="SchedulerJob", is_alive=True, order_by="-latest_heartbeat", limit=1
+    ).get("jobs") or []
+    alive = bool(jobs)
+    if not jobs:
+        jobs = client.get(
+            "/jobs", job_type="SchedulerJob", order_by="-latest_heartbeat", limit=1
+        ).get("jobs") or []
+    scheduler = jobs[0] if jobs else {}
 
-    heartbeat = getattr(scheduler, "latest_heartbeat", None)
-    alive = bool(scheduler and scheduler.is_alive()) if scheduler is not None else False
+    heartbeat = _dt(scheduler.get("latest_heartbeat"))
+    started = _dt(scheduler.get("start_date"))
     uptime = None
-    if scheduler is not None and scheduler.start_date is not None:
-        reference = heartbeat or datetime.now(tz=timezone.utc)
-        uptime = max((reference - scheduler.start_date).total_seconds(), 0.0)
+    if started is not None:
+        uptime = max(((heartbeat or datetime.now(tz=timezone.utc)) - started).total_seconds(), 0.0)
 
-    dags_total = int(session.scalar(select(func.count()).select_from(DagModel)) or 0)
-    dags_paused = int(
-        session.scalar(select(func.count()).select_from(DagModel).where(DagModel.is_paused.is_(True))) or 0
-    )
-    dags_broken = int(
-        session.scalar(
-            select(func.count()).select_from(DagModel).where(DagModel.has_import_errors.is_(True))
-        )
-        or 0
-    )
-    bundles = [
-        row
-        for row in session.scalars(select(func.distinct(DagModel.bundle_name))).all()
-        if row is not None
-    ]
+    # Stale dags are still dags as far as the census is concerned; they are what the
+    # Recycle Bin is full of.
+    dags = _dag_index(client)
+    bundles = {row.get("bundle_name") for row in dags.values() if row.get("bundle_name")}
 
     return SystemInfo(
         airflow_version=AIRFLOW_VERSION,
@@ -359,14 +453,14 @@ def system_info(session: Session) -> SystemInfo:
         dag_bundles=sorted(bundles) or ["dags-folder"],
         scheduler_alive=alive,
         scheduler_heartbeat=heartbeat,
-        scheduler_hostname=getattr(scheduler, "hostname", None),
+        scheduler_hostname=scheduler.get("hostname"),
         uptime_seconds=uptime,
-        dags_total=dags_total,
-        dags_paused=dags_paused,
-        dags_broken=dags_broken,
+        dags_total=len(dags),
+        dags_paused=sum(1 for row in dags.values() if row.get("is_paused")),
+        dags_broken=sum(1 for row in dags.values() if row.get("has_import_errors")),
         parallelism=conf.getint("core", "parallelism", fallback=32),
         max_active_tasks_per_dag=conf.getint("core", "max_active_tasks_per_dag", fallback=16),
-        performance=performance(session),
+        performance=performance(client),
     )
 
 
@@ -383,34 +477,6 @@ def system_info(session: Session) -> SystemInfo:
 
 DRIVE = "C:"
 
-# The DagModel columns Airflow OS reads. Same reasoning as the task-instance select:
-# name the columns instead of loading the entity, so a metadata DB that is a
-# migration behind the installed ORM still browses fine.
-_DAG_COLUMNS = (
-    DagModel.dag_id,
-    DagModel.dag_display_name,
-    DagModel.description,
-    DagModel.owners,
-    DagModel.is_paused,
-    DagModel.is_stale,
-    DagModel.has_import_errors,
-    DagModel.bundle_name,
-    DagModel.bundle_version,
-    DagModel.fileloc,
-    DagModel.relative_fileloc,
-    DagModel.timetable_summary,
-    DagModel.timetable_description,
-    DagModel.max_active_runs,
-    DagModel.max_active_tasks,
-    DagModel.last_parsed_time,
-    DagModel.next_dagrun,
-)
-
-
-def _get_dag(session: Session, dag_id: str):
-    """Fetch one dag row as a lightweight column tuple."""
-    return session.execute(select(*_DAG_COLUMNS).where(DagModel.dag_id == dag_id)).first()
-
 _STATE_ICONS = {
     "success": "file-ok",
     "failed": "file-bad",
@@ -425,17 +491,33 @@ _STATE_ICONS = {
 }
 
 
+def _get_dag(client: Rest, dag_id: str) -> dict:
+    """One dag's record, or ``{}`` when there is no such dag (or none this caller sees)."""
+    return client.get(f"/dags/{dag_id}")
+
+
+def _ti_path(dag_id: str, run_id: str, task_id: str, map_index: int = -1) -> str:
+    """The core API's address for one task instance, mapped or not.
+
+    A mapped instance is addressed by appending its index as a path segment; the
+    unmapped form has no segment at all, and passing ``-1`` explicitly returns the
+    unmapped row only on some releases. So the suffix is added only when it is real.
+    """
+    base = f"/dags/{dag_id}/dagRuns/{run_id}/taskInstances/{task_id}"
+    return base if map_index < 0 else f"{base}/{map_index}"
+
+
 def _split(path: str) -> list[str]:
     """Normalise a wire path into segments below the drive letter."""
     cleaned = (path or DRIVE).replace("\\", "/").strip("/")
     parts = [p for p in cleaned.split("/") if p]
-    if parts and parts[0].upper() == "C:":
+    if parts and parts[0].upper() == DRIVE:
         parts = parts[1:]
     return parts
 
 
 def path_segments(path: str) -> list[str]:
-    """Public view of the wire-path parser, so the API can authorize per file kind."""
+    """Public form of :func:`_split`, for the API layer's permission checks."""
     return _split(path)
 
 
@@ -458,35 +540,29 @@ def _task_folder_name(task_id: str, map_index: int) -> str:
     return task_id if map_index < 0 else f"{task_id}.{map_index}"
 
 
-def _parse_task_folder(name: str, session: Session, dag_id: str, run_id: str) -> tuple[str, int]:
+def _parse_task_folder(name: str, client: Rest, dag_id: str, run_id: str) -> tuple[str, int]:
     """Resolve a task folder name back to (task_id, map_index).
 
-    Task ids may legitimately contain dots, so a trailing ``.<int>`` is only treated
-    as a map index when the un-suffixed name actually exists as a mapped task.
+    Task ids may legitimately contain dots, so a trailing ``.<int>`` is only treated as a
+    map index when the un-suffixed name actually exists as a task in this run.
     """
     if "." in name:
         stem, _, suffix = name.rpartition(".")
         if suffix.isdigit():
-            exists = session.scalar(
-                select(func.count())
-                .select_from(TI)
-                .where(TI.dag_id == dag_id, TI.run_id == run_id, TI.task_id == stem)
+            exists = _count(
+                client, f"/dags/{dag_id}/dagRuns/{run_id}/taskInstances", task_id=stem
             )
             if exists:
                 return stem, int(suffix)
     return name, -1
 
 
-def list_drives(session: Session, allowed_dags: set[str] | None = None) -> list[FsEntry]:
-    """'My Computer'. One drive per Dag bundle, plus the control-panel style shortcuts."""
-    bundles = sorted(
-        row for row in session.scalars(select(func.distinct(DagModel.bundle_name))).all() if row
-    )
-    count_stmt = select(func.count()).select_from(DagModel)
-    if allowed_dags is not None:
-        count_stmt = count_stmt.where(DagModel.dag_id.in_(allowed_dags))
-    dag_count = int(session.scalar(count_stmt) or 0)
-    entries = [
+def list_drives(client: Rest) -> list[FsEntry]:
+    """'My Computer'. The dag bundle, as a hard drive."""
+    dags = _dag_index(client)
+    bundles = sorted({row.get("bundle_name") for row in dags.values() if row.get("bundle_name")})
+    dag_count = len(dags)
+    return [
         FsEntry(
             name=f"Dags ({DRIVE})",
             path=DRIVE,
@@ -496,74 +572,79 @@ def list_drives(session: Session, allowed_dags: set[str] | None = None) -> list[
             + (f" in {', '.join(bundles)}" if bundles else ""),
         )
     ]
-    return entries
 
 
-def list_dir(session: Session, path: str, allowed_dags: set[str] | None = None) -> FsListing:
+def list_dir(client: Rest, path: str) -> FsListing:
     """List one directory of the synthetic drive."""
     parts = _split(path)
     depth = len(parts)
 
-    if depth > 0 and allowed_dags is not None and parts[0] not in allowed_dags:
-        # Report an unreadable dag as absent rather than forbidden, so the listing
-        # does not confirm that a dag by that name exists.
-        raise FileNotFoundError(parts[0])
-
     if depth == 0:
-        return _list_dags(session, allowed_dags)
+        return _list_dags(client)
     if depth == 1:
-        return _list_dag_runs(session, parts[0])
+        return _list_dag_runs(client, parts[0])
     if depth == 2:
-        return _list_task_instances(session, parts[0], parts[1])
+        return _list_task_instances(client, parts[0], parts[1])
     if depth == 3:
-        return _list_task_instance(session, parts[0], parts[1], parts[2])
+        return _list_task_instance(client, parts[0], parts[1], parts[2])
     if depth == 4 and parts[3] == "xcom":
-        return _list_xcoms(session, parts[0], parts[1], parts[2])
+        return _list_xcoms(client, parts[0], parts[1], parts[2])
     return FsListing(path=_join(*parts), title=_join(*parts), parent=_parent(path), entries=[])
 
 
-def _list_dags(session: Session, allowed_dags: set[str] | None = None) -> FsListing:
-    stmt = select(
-            DagModel.dag_id,
-            DagModel.dag_display_name,
-            DagModel.is_paused,
-            DagModel.has_import_errors,
-            DagModel.last_parsed_time,
-            DagModel.timetable_summary,
-        DagModel.owners,
-    ).order_by(DagModel.dag_id)
-    if allowed_dags is not None:
-        stmt = stmt.where(DagModel.dag_id.in_(allowed_dags))
-    rows = session.execute(stmt).all()
+def _owners(row: dict) -> str | None:
+    """``owners`` arrives as a list over the API and as a comma-joined string in the DB."""
+    owners = row.get("owners")
+    if isinstance(owners, list):
+        return ", ".join(str(o) for o in owners) or None
+    return str(owners) if owners else None
+
+
+def _list_dags(client: Rest) -> FsListing:
     entries = [
         FsEntry(
-            name=dag_id,
-            path=_join(dag_id),
+            name=row["dag_id"],
+            path=_join(row["dag_id"]),
             kind="folder",
-            icon="folder-broken" if broken else ("folder-paused" if paused else "folder-dag"),
-            modified=last_parsed,
-            state="paused" if paused else ("broken" if broken else "active"),
+            icon=(
+                "folder-broken"
+                if row.get("has_import_errors")
+                else ("folder-paused" if row.get("is_paused") else "folder-dag")
+            ),
+            modified=_dt(row.get("last_parsed_time")),
+            state=(
+                "paused"
+                if row.get("is_paused")
+                else ("broken" if row.get("has_import_errors") else "active")
+            ),
             detail=" · ".join(
-                bit for bit in [display or None, schedule or None, (owners or None)] if bit
+                bit
+                for bit in [
+                    row.get("dag_display_name") or None,
+                    row.get("timetable_summary") or None,
+                    _owners(row),
+                ]
+                if bit
             ),
         )
-        for dag_id, display, paused, broken, last_parsed, schedule, owners in rows
+        for row in sorted(_dag_index(client).values(), key=lambda r: r["dag_id"])
     ]
     return FsListing(path=DRIVE, title=f"{DRIVE}\\", parent=None, entries=entries)
 
 
-def _list_dag_runs(session: Session, dag_id: str) -> FsListing:
-    dag = _get_dag(session, dag_id)
+def _list_dag_runs(client: Rest, dag_id: str) -> FsListing:
+    dag = _get_dag(client, dag_id)
     entries: list[FsEntry] = []
-    if dag is not None:
+    if dag:
+        parsed = _dt(dag.get("last_parsed_time"))
         entries.append(
             FsEntry(
                 name="dag.py",
                 path=_join(dag_id, "dag.py"),
                 kind="file",
                 icon="file-py",
-                modified=dag.last_parsed_time,
-                detail=dag.relative_fileloc or dag.fileloc,
+                modified=parsed,
+                detail=dag.get("relative_fileloc") or dag.get("fileloc"),
             )
         )
         entries.append(
@@ -572,79 +653,66 @@ def _list_dag_runs(session: Session, dag_id: str) -> FsListing:
                 path=_join(dag_id, "properties.json"),
                 kind="file",
                 icon="file-json",
-                modified=dag.last_parsed_time,
+                modified=parsed,
                 detail="Dag properties",
             )
         )
 
-    runs = session.execute(
-        select(
-            DagRun.run_id,
-            DagRun.state,
-            DagRun.run_type,
-            DagRun.logical_date,
-            DagRun.start_date,
-            DagRun.end_date,
-        )
-        .where(DagRun.dag_id == dag_id)
-        .order_by(DagRun.run_after.desc(), DagRun.id.desc())
-        .limit(200)
-    ).all()
-    for run_id, state, run_type, logical_date, start, end in runs:
+    for row in client.rows(
+        f"/dags/{dag_id}/dagRuns", "dag_runs", order_by="-run_after", max_rows=200
+    ):
+        run_id = row["dag_run_id"]
+        state = row.get("state")
         entries.append(
             FsEntry(
                 name=run_id,
                 path=_join(dag_id, run_id),
                 kind="folder",
                 icon=_state_icon(state, "folder-run").replace("file-", "folder-"),
-                modified=end or start or logical_date,
+                modified=_dt(row.get("end_date") or row.get("start_date") or row.get("logical_date")),
                 state=str(state) if state else None,
-                detail=str(run_type) if run_type else None,
+                detail=str(row.get("run_type")) if row.get("run_type") else None,
             )
         )
-    return FsListing(
-        path=_join(dag_id), title=f"{DRIVE}\\{dag_id}", parent=DRIVE, entries=entries
+    return FsListing(path=_join(dag_id), title=f"{DRIVE}\\{dag_id}", parent=DRIVE, entries=entries)
+
+
+def _list_task_instances(client: Rest, dag_id: str, run_id: str) -> FsListing:
+    # No ``order_by``: the task instance endpoint does not accept task_id as a sort key,
+    # and the folder order is settled below anyway, mapped indexes included.
+    rows = client.rows(
+        f"/dags/{dag_id}/dagRuns/{run_id}/taskInstances", "task_instances", max_rows=1000
     )
-
-
-def _list_task_instances(session: Session, dag_id: str, run_id: str) -> FsListing:
-    rows = session.execute(
-        select(
-            TI.task_id,
-            TI.map_index,
-            TI.state,
-            TI.duration,
-            TI.end_date,
-            TI.start_date,
-            TI.try_number,
-            TI.operator,
+    entries = []
+    for row in sorted(rows, key=lambda r: (r["task_id"], r.get("map_index", -1))):
+        task_id = row["task_id"]
+        map_index = row.get("map_index", -1)
+        folder = _task_folder_name(task_id, map_index)
+        state = row.get("state")
+        duration = row.get("duration")
+        try_number = row.get("try_number") or 0
+        entries.append(
+            FsEntry(
+                name=folder,
+                path=_join(dag_id, run_id, folder),
+                kind="folder",
+                icon=_state_icon(state, "folder-task").replace("file-", "folder-"),
+                modified=_dt(row.get("end_date") or row.get("start_date")),
+                state=str(state) if state else None,
+                task_id=task_id,
+                map_index=map_index,
+                try_number=try_number,
+                detail=" · ".join(
+                    bit
+                    for bit in [
+                        row.get("operator"),
+                        f"{duration:.1f}s" if duration else None,
+                        f"try {try_number}" if try_number else None,
+                    ]
+                    if bit
+                ),
+            )
         )
-        .where(TI.dag_id == dag_id, TI.run_id == run_id)
-        .order_by(TI.task_id, TI.map_index)
-    ).all()
-    entries = [
-        FsEntry(
-            name=_task_folder_name(task_id, map_index),
-            path=_join(dag_id, run_id, _task_folder_name(task_id, map_index)),
-            kind="folder",
-            icon=_state_icon(state, "folder-task").replace("file-", "folder-"),
-            modified=end or start,
-            state=str(state) if state else None,
-            task_id=task_id,
-            map_index=map_index,
-            try_number=try_number,
-            detail=" · ".join(
-                bit
-                for bit in [
-                    operator,
-                    f"{duration:.1f}s" if duration else None,
-                    f"try {try_number}" if try_number else None,
-                ]
-                if bit
-            ),
-        )
-        for task_id, map_index, state, duration, end, start, try_number, operator in rows
-    ]
     return FsListing(
         path=_join(dag_id, run_id),
         title=f"{DRIVE}\\{dag_id}\\{run_id}",
@@ -653,27 +721,16 @@ def _list_task_instances(session: Session, dag_id: str, run_id: str) -> FsListin
     )
 
 
-def _list_task_instance(session: Session, dag_id: str, run_id: str, folder: str) -> FsListing:
-    task_id, map_index = _parse_task_folder(folder, session, dag_id, run_id)
-    ti = session.execute(
-        select(
-            TI.state,
-            TI.try_number,
-            TI.max_tries,
-            TI.start_date,
-            TI.end_date,
-            TI.updated_at,
-        ).where(
-            TI.dag_id == dag_id,
-            TI.run_id == run_id,
-            TI.task_id == task_id,
-            TI.map_index == map_index,
-        )
-    ).first()
+def _list_task_instance(client: Rest, dag_id: str, run_id: str, folder: str) -> FsListing:
+    task_id, map_index = _parse_task_folder(folder, client, dag_id, run_id)
+    ti = client.get(_ti_path(dag_id, run_id, task_id, map_index))
     base = _join(dag_id, run_id, folder)
     entries: list[FsEntry] = []
-    if ti is not None:
-        tries = max(ti.try_number or 1, 1)
+    if ti:
+        modified = _dt(ti.get("end_date") or ti.get("start_date"))
+        state = ti.get("state")
+        max_tries = ti.get("max_tries") or 0
+        tries = max(ti.get("try_number") or 1, 1)
         for attempt in range(tries, 0, -1):
             entries.append(
                 FsEntry(
@@ -681,26 +738,18 @@ def _list_task_instance(session: Session, dag_id: str, run_id: str, folder: str)
                     path=f"{base}/stdout.{attempt}.log",
                     kind="file",
                     icon="file-log",
-                    modified=ti.end_date or ti.start_date,
-                    state=str(ti.state) if ti.state else None,
+                    modified=modified,
+                    state=str(state) if state else None,
                     task_id=task_id,
                     map_index=map_index,
                     try_number=attempt,
-                    detail=f"attempt {attempt} of {ti.max_tries + 1 if ti.max_tries else tries}",
+                    detail=f"attempt {attempt} of {max_tries + 1 if max_tries else tries}",
                 )
             )
-        xcom_count = int(
-            session.scalar(
-                select(func.count())
-                .select_from(XComModel)
-                .where(
-                    XComModel.dag_id == dag_id,
-                    XComModel.run_id == run_id,
-                    XComModel.task_id == task_id,
-                    XComModel.map_index == map_index,
-                )
-            )
-            or 0
+        xcom_count = _count(
+            client,
+            f"/dags/{dag_id}/dagRuns/{run_id}/taskInstances/{task_id}/xcomEntries",
+            map_index=map_index,
         )
         entries.append(
             FsEntry(
@@ -717,7 +766,7 @@ def _list_task_instance(session: Session, dag_id: str, run_id: str, folder: str)
                 path=f"{base}/details.json",
                 kind="file",
                 icon="file-json",
-                modified=ti.updated_at,
+                modified=modified,
                 detail="Task instance properties",
             )
         )
@@ -729,29 +778,25 @@ def _list_task_instance(session: Session, dag_id: str, run_id: str, folder: str)
     )
 
 
-def _list_xcoms(session: Session, dag_id: str, run_id: str, folder: str) -> FsListing:
-    task_id, map_index = _parse_task_folder(folder, session, dag_id, run_id)
-    rows = session.execute(
-        select(XComModel.key, XComModel.timestamp)
-        .where(
-            XComModel.dag_id == dag_id,
-            XComModel.run_id == run_id,
-            XComModel.task_id == task_id,
-            XComModel.map_index == map_index,
-        )
-        .order_by(XComModel.key)
-    ).all()
+def _list_xcoms(client: Rest, dag_id: str, run_id: str, folder: str) -> FsListing:
+    task_id, map_index = _parse_task_folder(folder, client, dag_id, run_id)
+    rows = client.rows(
+        f"/dags/{dag_id}/dagRuns/{run_id}/taskInstances/{task_id}/xcomEntries",
+        "xcom_entries",
+        map_index=map_index,
+        max_rows=200,
+    )
     base = _join(dag_id, run_id, folder, "xcom")
     entries = [
         FsEntry(
-            name=f"{key}.json",
-            path=f"{base}/{key}.json",
+            name=f"{row['key']}.json",
+            path=f"{base}/{row['key']}.json",
             kind="file",
             icon="file-json",
-            modified=timestamp,
+            modified=_dt(row.get("timestamp")),
             detail="XCom value",
         )
-        for key, timestamp in rows
+        for row in sorted(rows, key=lambda r: r["key"])
     ]
     return FsListing(
         path=base,
@@ -761,29 +806,25 @@ def _list_xcoms(session: Session, dag_id: str, run_id: str, folder: str) -> FsLi
     )
 
 
-def read_file(session: Session, path: str, allowed_dags: set[str] | None = None) -> FsFile:
+def read_file(client: Rest, path: str) -> FsFile:
     """Open one synthetic file in Notepad.
 
-    Task logs are deliberately *not* served here - the shell streams those from the
-    core REST log endpoint so it inherits pagination and the log handler config.
+    Task logs are deliberately *not* served here - the shell streams those from the core
+    REST log endpoint so it inherits pagination and the log handler config.
     """
     parts = _split(path)
     if not parts:
         raise FileNotFoundError(path)
-    if allowed_dags is not None and parts[0] not in allowed_dags:
-        # Same rule as list_dir: an unreadable dag reads as absent, not forbidden. The
-        # API checks this too; the kernel repeats it so no caller can skip it.
-        raise FileNotFoundError(parts[0])
     name = parts[-1]
 
     if len(parts) == 2 and name == "dag.py":
-        return _read_dag_source(session, parts[0], allowed_dags)
+        return _read_dag_source(client, parts[0])
     if len(parts) == 2 and name == "properties.json":
-        return _read_dag_properties(session, parts[0])
+        return _read_dag_properties(client, parts[0])
     if len(parts) == 4 and name == "details.json":
-        return _read_ti_details(session, parts[0], parts[1], parts[2])
+        return _read_ti_details(client, parts[0], parts[1], parts[2])
     if len(parts) == 5 and parts[3] == "xcom" and name.endswith(".json"):
-        return _read_xcom(session, parts[0], parts[1], parts[2], name[: -len(".json")])
+        return _read_xcom(client, parts[0], parts[1], parts[2], name[: -len(".json")])
     raise FileNotFoundError(path)
 
 
@@ -798,85 +839,66 @@ def _as_json(value: Any) -> str:
     return json.dumps(value, indent=2, sort_keys=True, default=default)
 
 
-def _read_dag_source(
-    session: Session, dag_id: str, allowed_dags: set[str] | None = None
-) -> FsFile:
-    """Open a dag's source.
+def _read_dag_source(client: Rest, dag_id: str) -> FsFile:
+    """Open a dag's source, as Airflow parsed it.
 
-    Reads the version-pinned copy from ``dag_code`` rather than opening
-    ``DagModel.fileloc`` off the api-server's disk: the DB copy is what Airflow
-    actually parsed, and going through the filesystem would bypass the per-file
-    redaction below. One file may define several dags, so if the caller cannot read
-    every dag defined in it, the whole file is withheld - the same rule the core
-    ``/dagSources`` endpoint applies.
+    ``/dagSources`` serves the version-pinned copy from ``dag_code``, not whatever is on
+    the api-server's disk now. It also owns the awkward rule about shared files: one
+    ``.py`` may define several dags, and a caller who cannot read all of them may not
+    read the file. That check used to be reimplemented here; now the endpoint that
+    invented it decides, and a refusal is rendered as a withheld-source note.
     """
-    from airflow.models.dagcode import DagCode
-
-    dag = _get_dag(session, dag_id)
-    if dag is None:
-        raise FileNotFoundError(dag_id)
-
-    if allowed_dags is not None and dag.relative_fileloc:
-        colocated = set(
-            session.scalars(
-                select(DagModel.dag_id).where(
-                    DagModel.relative_fileloc == dag.relative_fileloc,
-                    DagModel.bundle_name == dag.bundle_name,
-                )
-            ).all()
+    path = _join(dag_id, "dag.py")
+    try:
+        source = client.get(f"/dagSources/{dag_id}")
+    except HTTPException as exc:
+        if exc.status_code not in (401, 403):
+            raise
+        content = (
+            "# Source withheld.\n#\n"
+            "# This file also defines dags you do not have permission to read.\n"
         )
-        if colocated and not colocated.issubset(allowed_dags):
-            content = (
-                "# Source withheld.\n#\n"
-                "# This file also defines dags you do not have permission to read:\n"
-                + "".join(f"#   {other}\n" for other in sorted(colocated - allowed_dags))
-            )
-            return FsFile(
-                path=_join(dag_id, "dag.py"), name="dag.py", content=content, language="python"
-            )
+        return FsFile(path=path, name="dag.py", content=content, language="python")
 
-    content = session.scalar(
-        select(DagCode.source_code)
-        .where(DagCode.dag_id == dag_id)
-        .order_by(DagCode.last_updated.desc())
-        .limit(1)
-    )
+    content = (source or {}).get("content")
     if content is None:
+        if not _get_dag(client, dag_id):
+            raise FileNotFoundError(dag_id)
         content = f"# No parsed source is stored for {dag_id}.\n"
 
-    truncated = len(content) > _MAX_LOG_BYTES
     return FsFile(
-        path=_join(dag_id, "dag.py"),
+        path=path,
         name="dag.py",
         content=content[:_MAX_LOG_BYTES],
         language="python",
-        truncated=truncated,
+        truncated=len(content) > _MAX_LOG_BYTES,
     )
 
 
-def _read_dag_properties(session: Session, dag_id: str) -> FsFile:
-    dag = _get_dag(session, dag_id)
-    if dag is None:
+def _read_dag_properties(client: Rest, dag_id: str) -> FsFile:
+    dag = _get_dag(client, dag_id)
+    if not dag:
         raise FileNotFoundError(dag_id)
-    payload = {
-        "dag_id": dag.dag_id,
-        "dag_display_name": dag.dag_display_name,
-        "description": dag.description,
-        "owners": dag.owners,
-        "is_paused": dag.is_paused,
-        "is_stale": dag.is_stale,
-        "has_import_errors": dag.has_import_errors,
-        "bundle_name": dag.bundle_name,
-        "bundle_version": dag.bundle_version,
-        "fileloc": dag.fileloc,
-        "relative_fileloc": dag.relative_fileloc,
-        "timetable_summary": dag.timetable_summary,
-        "timetable_description": dag.timetable_description,
-        "max_active_runs": dag.max_active_runs,
-        "max_active_tasks": dag.max_active_tasks,
-        "last_parsed_time": dag.last_parsed_time,
-        "next_dagrun": dag.next_dagrun,
-    }
+    keep = (
+        "dag_id",
+        "dag_display_name",
+        "description",
+        "owners",
+        "is_paused",
+        "is_stale",
+        "has_import_errors",
+        "bundle_name",
+        "bundle_version",
+        "fileloc",
+        "relative_fileloc",
+        "timetable_summary",
+        "timetable_description",
+        "max_active_runs",
+        "max_active_tasks",
+        "last_parsed_time",
+    )
+    payload = {key: dag.get(key) for key in keep}
+    payload["next_dagrun"] = dag.get("next_dagrun_logical_date")
     return FsFile(
         path=_join(dag_id, "properties.json"),
         name="properties.json",
@@ -885,57 +907,34 @@ def _read_dag_properties(session: Session, dag_id: str) -> FsFile:
     )
 
 
-def _read_ti_details(session: Session, dag_id: str, run_id: str, folder: str) -> FsFile:
-    task_id, map_index = _parse_task_folder(folder, session, dag_id, run_id)
-    ti = session.execute(
-        select(
-            TI.state,
-            TI.operator,
-            TI.try_number,
-            TI.max_tries,
-            TI.start_date,
-            TI.end_date,
-            TI.duration,
-            TI.hostname,
-            TI.pid,
-            TI.pool,
-            TI.pool_slots,
-            TI.queue,
-            TI.priority_weight,
-            TI.executor,
-            TI.queued_dttm,
-            TI.trigger_id,
-        ).where(
-            TI.dag_id == dag_id,
-            TI.run_id == run_id,
-            TI.task_id == task_id,
-            TI.map_index == map_index,
-        )
-    ).first()
-    if ti is None:
+def _read_ti_details(client: Rest, dag_id: str, run_id: str, folder: str) -> FsFile:
+    task_id, map_index = _parse_task_folder(folder, client, dag_id, run_id)
+    ti = client.get(_ti_path(dag_id, run_id, task_id, map_index))
+    if not ti:
         raise FileNotFoundError(folder)
+    trigger = ti.get("trigger") or {}
     payload = {
         "dag_id": dag_id,
         "run_id": run_id,
         "task_id": task_id,
         "map_index": map_index,
-        "state": str(ti.state) if ti.state else None,
-        "operator": ti.operator,
-        "try_number": ti.try_number,
-        "max_tries": ti.max_tries,
-        "start_date": ti.start_date,
-        "end_date": ti.end_date,
-        "duration": ti.duration,
-        "hostname": ti.hostname,
-        "pid": ti.pid,
-        "pool": ti.pool,
-        "pool_slots": ti.pool_slots,
-        "queue": ti.queue,
-        "priority_weight": ti.priority_weight,
-        "priority_class": _priority_class(ti.priority_weight),
-        "executor": ti.executor,
-        "queued_dttm": ti.queued_dttm,
-        "trigger_id": ti.trigger_id,
+        "state": ti.get("state"),
+        "operator": ti.get("operator"),
+        "try_number": ti.get("try_number"),
+        "max_tries": ti.get("max_tries"),
+        "start_date": ti.get("start_date"),
+        "end_date": ti.get("end_date"),
+        "duration": ti.get("duration"),
+        "hostname": ti.get("hostname"),
+        "pid": ti.get("pid"),
+        "pool": ti.get("pool"),
+        "pool_slots": ti.get("pool_slots"),
+        "queue": ti.get("queue"),
+        "priority_weight": ti.get("priority_weight"),
+        "priority_class": _priority_class(ti.get("priority_weight")),
+        "executor": ti.get("executor"),
+        "queued_dttm": ti.get("queued_when"),
+        "trigger_id": trigger.get("id") if isinstance(trigger, dict) else None,
     }
     return FsFile(
         path=_join(dag_id, run_id, folder, "details.json"),
@@ -945,83 +944,90 @@ def _read_ti_details(session: Session, dag_id: str, run_id: str, folder: str) ->
     )
 
 
-def _read_xcom(session: Session, dag_id: str, run_id: str, folder: str, key: str) -> FsFile:
-    task_id, map_index = _parse_task_folder(folder, session, dag_id, run_id)
-    raw = session.scalar(
-        select(XComModel.value).where(
-            XComModel.dag_id == dag_id,
-            XComModel.run_id == run_id,
-            XComModel.task_id == task_id,
-            XComModel.map_index == map_index,
-            XComModel.key == key,
-        )
+def _read_xcom(client: Rest, dag_id: str, run_id: str, folder: str, key: str) -> FsFile:
+    """Open one XCom value.
+
+    The core endpoint deserialises the value itself, which is the part that used to need
+    care here: loading the ORM entity to get at ``deserialize_value`` breaks against a
+    metadata database a migration behind.
+    """
+    task_id, map_index = _parse_task_folder(folder, client, dag_id, run_id)
+    entry = client.get(
+        f"/dags/{dag_id}/dagRuns/{run_id}/taskInstances/{task_id}/xcomEntries/{key}",
+        map_index=map_index,
     )
-    if raw is None:
+    if not entry:
         raise FileNotFoundError(key)
-    try:
-        # deserialize_value only reads ``.value``; wrapping avoids an entity load,
-        # which would break on any metadata DB a migration behind the ORM.
-        value = XComModel.deserialize_value(SimpleNamespace(value=raw))
-    except Exception as exc:  # noqa: BLE001 - a corrupt XCom should still open
-        value = f"<could not deserialize: {exc}>"
     return FsFile(
         path=_join(dag_id, run_id, folder, "xcom", f"{key}.json"),
         name=f"{key}.json",
-        content=_as_json(value),
+        content=_as_json(entry.get("value")),
         language="json",
     )
 
 
-def control_panel(session: Session) -> dict[str, Any]:
-    """Contents of the Control Panel applets: Variables, Connections, Pools."""
-    variables = [
-        {"key": key, "description": description, "is_encrypted": bool(encrypted)}
-        for key, description, encrypted in session.execute(
-            select(Variable.key, Variable.description, Variable.is_encrypted).order_by(Variable.key)
-        ).all()
-    ]
-    connections = [
-        {
-            "conn_id": conn_id,
-            "conn_type": conn_type,
-            "host": host,
-            "schema": schema,
-            "login": login,
-            "port": port,
-            "description": description,
-        }
-        for conn_id, conn_type, host, schema, login, port, description in session.execute(
-            select(
-                Connection.conn_id,
-                Connection.conn_type,
-                Connection.host,
-                Connection.schema,
-                Connection.login,
-                Connection.port,
-                Connection.description,
-            ).order_by(Connection.conn_id)
-        ).all()
-    ]
+def _applet(fetch: Any) -> list[dict]:
+    """One Control Panel applet, or an empty one.
 
-    occupied = dict(
-        session.execute(
-            select(TI.pool, func.coalesce(func.sum(TI.pool_slots), 0))
-            .where(TI.state.in_((TaskInstanceState.RUNNING, TaskInstanceState.QUEUED)))
-            .group_by(TI.pool)
-        ).all()
+    A deployment whose Fernet key has been rotated cannot decrypt its own Connections,
+    and the core API answers 500 rather than omitting the field. That is worth one empty
+    applet, not a dead Control Panel, so a server-side failure degrades just this list.
+    A refusal (401/403) still propagates: "you may not see this" is an answer the
+    desktop must show rather than dress up as "there is nothing here".
+    """
+    try:
+        return fetch()
+    except HTTPException as exc:
+        if exc.status_code < 500:
+            raise
+        return []
+
+
+def control_panel(client: Rest) -> dict[str, Any]:
+    """Contents of the Control Panel applets: Variables, Connections, Pools.
+
+    Values are deliberately dropped on the way through. ``/api/v2/variables`` and
+    ``/api/v2/connections`` will hand a sufficiently privileged caller the decrypted
+    value, the password and the ``extra`` blob; the desktop lists names and shapes, so
+    the secrets are discarded here rather than sent to a browser that has no use for
+    them. Pool occupancy arrives already counted, which used to be a GROUP BY.
+    """
+    variables = _applet(
+        lambda: [
+            {
+                "key": row.get("key"),
+                "description": row.get("description"),
+                "is_encrypted": bool(row.get("is_encrypted")),
+            }
+            for row in client.rows("/variables", "variables", order_by="key")
+        ]
     )
-    pools = [
-        {
-            "name": name,
-            "slots": slots,
-            "description": description,
-            "include_deferred": bool(include_deferred),
-            "occupied_slots": int(occupied.get(name, 0) or 0),
-        }
-        for name, slots, description, include_deferred in session.execute(
-            select(Pool.pool, Pool.slots, Pool.description, Pool.include_deferred).order_by(Pool.pool)
-        ).all()
-    ]
+    connections = _applet(
+        lambda: [
+            {
+                "conn_id": row.get("connection_id"),
+                "conn_type": row.get("conn_type"),
+                "host": row.get("host"),
+                "schema": row.get("schema"),
+                "login": row.get("login"),
+                "port": row.get("port"),
+                "description": row.get("description"),
+            }
+            for row in client.rows("/connections", "connections", order_by="connection_id")
+        ]
+    )
+    pools = _applet(
+        lambda: [
+            {
+                "name": row.get("name"),
+                "slots": row.get("slots"),
+                "description": row.get("description"),
+                "include_deferred": bool(row.get("include_deferred")),
+                "occupied_slots": int(row.get("occupied_slots") or 0),
+            }
+            for row in client.rows("/pools", "pools", order_by="name")
+        ]
+    )
     return {"variables": variables, "connections": connections, "pools": pools}
 
 
@@ -1039,54 +1045,40 @@ LOG_TAIL_LINES = 120
 
 
 def _read_log_tail(
-    session: Session, dag_id: str, run_id: str, task_id: str, map_index: int, try_number: int
+    client: Rest, dag_id: str, run_id: str, task_id: str, map_index: int, try_number: int
 ) -> str:
     """Best-effort tail of one task log.
 
-    Goes through the configured task log handler rather than guessing file paths, so
-    it works with remote logging too. A log that cannot be read is not fatal: the
-    model can still reason from the metadata, and is told the log was unavailable.
+    The core log endpoint applies whatever handler the deployment configured, so remote
+    logging works here without the plugin knowing anything about it. A log that cannot be
+    read is not fatal: the model can still reason from the metadata, and is told the log
+    was unavailable rather than being handed silence.
     """
     try:
-        from airflow.models.taskinstance import TaskInstance as TI_MODEL
-        from airflow.utils.log.log_reader import TaskLogReader
-
-        ti = session.scalars(
-            select(TI_MODEL).where(
-                TI_MODEL.dag_id == dag_id,
-                TI_MODEL.run_id == run_id,
-                TI_MODEL.task_id == task_id,
-                TI_MODEL.map_index == map_index,
-            )
-        ).first()
-        if ti is None:
+        payload = client.get(
+            f"/dags/{dag_id}/dagRuns/{run_id}/taskInstances/{task_id}/logs/{max(try_number, 1)}",
+            map_index=map_index,
+        )
+        if not payload:
             return "(task instance not found)"
 
-        reader = TaskLogReader()
-        if not reader.supports_read:
-            return "(the configured log handler does not support reading)"
-
-        # read_log_chunks returns (stream, metadata); the stream yields
-        # StructuredLogMessage objects rather than plain strings.
-        stream, _ = reader.read_log_chunks(ti, max(try_number, 1), metadata={})
         lines: list[str] = []
-        for message in stream:
+        for message in payload.get("content") or []:
             if isinstance(message, str):
                 lines.append(message)
                 continue
-            event = getattr(message, "event", None)
-            if event is None:
+            if not isinstance(message, dict):
                 lines.append(str(message))
                 continue
-            timestamp = getattr(message, "timestamp", None)
-            lines.append(f"{timestamp} {event}" if timestamp else str(event))
+            event = message.get("event")
+            timestamp = message.get("timestamp")
+            lines.append(f"{timestamp} {event}" if timestamp and event else str(event or message))
 
-            # Airflow 3 logs a traceback as structured data rather than text: the
-            # event only says "Task failed with exception", and the exception class
-            # and message live in an ``error_detail`` extra. Without this the tail
-            # never contains the one line a reader actually wants.
-            extra = getattr(message, "model_extra", None) or {}
-            for detail in extra.get("error_detail") or []:
+            # Airflow 3 logs a traceback as structured data rather than text: the event
+            # only says "Task failed with exception", and the exception class and message
+            # live in an ``error_detail`` extra. Without this the tail never contains the
+            # one line a reader actually wants.
+            for detail in message.get("error_detail") or []:
                 if not isinstance(detail, dict):
                     continue
                 exc_type = detail.get("exc_type")
@@ -1104,7 +1096,7 @@ def _read_log_tail(
 
 
 def failure_evidence(
-    session: Session,
+    client: Rest,
     *,
     dag_id: str,
     run_id: str,
@@ -1113,35 +1105,19 @@ def failure_evidence(
     try_number: int = 0,
 ) -> dict[str, Any]:
     """Everything a human would look at first when triaging one failed task."""
-    row = session.execute(
-        select(
-            TI.state,
-            TI.operator,
-            TI.try_number,
-            TI.max_tries,
-            TI.duration,
-            TI.hostname,
-            TI.pool,
-            TI.queue,
-        ).where(
-            TI.dag_id == dag_id,
-            TI.run_id == run_id,
-            TI.task_id == task_id,
-            TI.map_index == map_index,
-        )
-    ).first()
-    if row is None:
+    ti = client.get(_ti_path(dag_id, run_id, task_id, map_index))
+    if not ti:
         raise FileNotFoundError(f"{dag_id}.{task_id} in {run_id}")
 
-    attempt = try_number or row.try_number or 1
+    attempt = try_number or ti.get("try_number") or 1
 
-    # Sibling states let the model tell "this task broke" apart from
-    # "this task was a casualty of something upstream".
+    # Sibling states let the model tell "this task broke" apart from "this task was a
+    # casualty of something upstream".
     siblings = [
-        {"task_id": tid, "state": str(state) if state else None}
-        for tid, state in session.execute(
-            select(TI.task_id, TI.state).where(TI.dag_id == dag_id, TI.run_id == run_id)
-        ).all()
+        {"task_id": row.get("task_id"), "state": row.get("state")}
+        for row in client.rows(
+            f"/dags/{dag_id}/dagRuns/{run_id}/taskInstances", "task_instances", max_rows=1000
+        )
     ]
 
     return {
@@ -1150,14 +1126,14 @@ def failure_evidence(
         "task_id": task_id,
         "map_index": map_index,
         "try_number": attempt,
-        "state": str(row.state) if row.state else None,
-        "operator": row.operator,
-        "tries": f"{row.try_number} of {(row.max_tries or 0) + 1}",
-        "duration_seconds": row.duration,
-        "hostname": row.hostname,
-        "pool": row.pool,
-        "queue": row.queue,
-        "log_tail": _read_log_tail(session, dag_id, run_id, task_id, map_index, attempt),
+        "state": ti.get("state"),
+        "operator": ti.get("operator"),
+        "tries": f"{ti.get('try_number')} of {(ti.get('max_tries') or 0) + 1}",
+        "duration_seconds": ti.get("duration"),
+        "hostname": ti.get("hostname"),
+        "pool": ti.get("pool"),
+        "queue": ti.get("queue"),
+        "log_tail": _read_log_tail(client, dag_id, run_id, task_id, map_index, attempt),
         "run_task_states": siblings,
     }
 
@@ -1165,80 +1141,53 @@ def failure_evidence(
 # ---------------------------------------------------------------------------
 # Human-in-the-loop
 #
-# The core API only exposes HITL details per dag run, so there is no way to ask
-# "what is waiting on a human anywhere in this deployment?" - which is exactly
-# what an inbox needs. This does that query once, filtered to the dags the
-# caller may read. Responding still goes through the public REST API, so the
-# resume path and its audit entry are Airflow's, not ours.
+# The core API lists HITL details a dag run at a time, which is the wrong shape
+# for an inbox: what needs me, anywhere? The same route takes ``~`` for both the
+# dag and the run, so one request answers it. Responding still goes through the
+# public REST API from the browser, so the resume path and its audit entry are
+# Airflow's, not ours.
 # ---------------------------------------------------------------------------
 
 
-def list_hitl_requests(
-    session: Session,
-    *,
-    allowed_dags: set[str] | None = None,
-    include_answered: bool = False,
-) -> list[Any]:
-    """Every human-in-the-loop request waiting on an answer, newest first."""
-    try:
-        from airflow.models.hitl import HITLDetail
-    except ImportError:
-        # HITL landed in Airflow 3.1; on anything older the inbox is simply empty.
-        return []
+def list_hitl_requests(client: Rest, *, include_answered: bool = False) -> list[Any]:
+    """Every human-in-the-loop request waiting on an answer, newest first.
 
+    The core API lists these per dag run, which cannot answer "what needs me?" -- but
+    the same route takes ``~`` for both the dag and the run, and that does.
+    """
     from airflow_os.schemas import HitlRequest
 
-    stmt = (
-        select(
-            HITLDetail.ti_id,
-            HITLDetail.subject,
-            HITLDetail.body,
-            HITLDetail.options,
-            HITLDetail.defaults,
-            HITLDetail.multiple,
-            HITLDetail.params,
-            HITLDetail.assignees,
-            HITLDetail.created_at,
-            HITLDetail.responded_at,
-            HITLDetail.responded_by,
-            HITLDetail.chosen_options,
-            TI.dag_id,
-            TI.run_id,
-            TI.task_id,
-            TI.map_index,
-            TI.state,
-        )
-        .join(TI, TI.id == HITLDetail.ti_id)
-        .order_by(HITLDetail.created_at.desc())
-        .limit(200)
+    rows = client.rows(
+        f"/dags/{ANY}/dagRuns/{ANY}/hitlDetails",
+        "hitl_details",
+        order_by="-created_at",
+        response_received=None if include_answered else False,
+        max_rows=200,
     )
-    if not include_answered:
-        stmt = stmt.where(HITLDetail.responded_at.is_(None))
-    if allowed_dags is not None:
-        stmt = stmt.where(TI.dag_id.in_(allowed_dags))
 
     requests: list[Any] = []
-    for row in session.execute(stmt).all():
-        responder = row.responded_by
+    for row in rows:
+        ti = row.get("task_instance") or {}
+        responder = row.get("responded_by_user") or {}
         requests.append(
             HitlRequest(
-                ti_id=str(row.ti_id),
-                dag_id=row.dag_id,
-                run_id=row.run_id,
-                task_id=row.task_id,
-                map_index=row.map_index,
-                task_state=str(row.state) if row.state else None,
-                subject=row.subject,
-                body=row.body,
-                options=list(row.options or []),
-                defaults=list(row.defaults) if row.defaults else None,
-                multiple=bool(row.multiple),
-                params=dict(row.params or {}),
-                assignees=list(row.assignees or []),
-                created_at=row.created_at,
-                responded_at=row.responded_at,
-                responded_by=(responder or {}).get("name") if isinstance(responder, dict) else None,
-                chosen_options=list(row.chosen_options) if row.chosen_options else None,
+                ti_id=str(ti.get("id") or ""),
+                dag_id=ti.get("dag_id") or "",
+                run_id=ti.get("dag_run_id") or "",
+                task_id=ti.get("task_id") or "",
+                map_index=ti.get("map_index", -1),
+                task_state=ti.get("state"),
+                subject=row.get("subject") or "",
+                body=row.get("body"),
+                options=list(row.get("options") or []),
+                defaults=list(row["defaults"]) if row.get("defaults") else None,
+                multiple=bool(row.get("multiple")),
+                params=dict(row.get("params") or {}),
+                assignees=list(row.get("assigned_users") or []),
+                created_at=_dt(row.get("created_at")),
+                responded_at=_dt(row.get("responded_at")),
+                responded_by=responder.get("name") if isinstance(responder, dict) else None,
+                chosen_options=list(row["chosen_options"]) if row.get("chosen_options") else None,
             )
         )
     return requests
@@ -1255,36 +1204,35 @@ def list_hitl_requests(
 # ---------------------------------------------------------------------------
 
 
-def list_recycled(session: Session, *, allowed_dags: set[str] | None = None) -> list[Any]:
-    """Everything Airflow has deleted but kept, newest first."""
+def list_recycled(client: Rest) -> list[Any]:
+    """Everything Airflow has deleted but kept, newest first.
+
+    Two kinds of thing end up here, and neither is really gone. A dag whose file
+    disappeared is marked ``is_stale`` and keeps all its history, which the dag listing
+    will only show when asked with ``exclude_stale=false``. A task removed from a dag
+    leaves its old instances in state ``removed``.
+    """
     from airflow_os.schemas import RecycledItem
 
     items: list[Any] = []
 
-    stale_stmt = select(
-        DagModel.dag_id,
-        DagModel.last_parsed_time,
-        DagModel.relative_fileloc,
-        DagModel.bundle_name,
-        DagModel.is_paused,
-    ).where(DagModel.is_stale.is_(True))
-    if allowed_dags is not None:
-        stale_stmt = stale_stmt.where(DagModel.dag_id.in_(allowed_dags))
-
-    for row in session.execute(stale_stmt).all():
+    for row in client.rows("/dags", "dags", exclude_stale=False):
+        if not row.get("is_stale"):
+            continue
+        dag_id = row["dag_id"]
         items.append(
             RecycledItem(
-                key=f"dag:{row.dag_id}",
+                key=f"dag:{dag_id}",
                 kind="dag",
-                name=row.dag_id,
-                dag_id=row.dag_id,
-                deleted_at=row.last_parsed_time,
+                name=dag_id,
+                dag_id=dag_id,
+                deleted_at=_dt(row.get("last_parsed_time")),
                 detail=" · ".join(
                     bit
                     for bit in [
-                        row.relative_fileloc or "no recorded file",
-                        row.bundle_name,
-                        "paused" if row.is_paused else None,
+                        row.get("relative_fileloc") or "no recorded file",
+                        row.get("bundle_name"),
+                        "paused" if row.get("is_paused") else None,
                     ]
                     if bit
                 ),
@@ -1293,27 +1241,30 @@ def list_recycled(session: Session, *, allowed_dags: set[str] | None = None) -> 
             )
         )
 
-    removed_stmt = (
-        select(TI.dag_id, TI.run_id, TI.task_id, TI.map_index, TI.updated_at, TI.operator)
-        .where(TI.state == TaskInstanceState.REMOVED)
-        .order_by(TI.updated_at.desc())
-        .limit(200)
+    removed = client.rows(
+        f"/dags/{ANY}/dagRuns/{ANY}/taskInstances",
+        "task_instances",
+        state="removed",
+        order_by="-start_date",
+        max_rows=200,
     )
-    if allowed_dags is not None:
-        removed_stmt = removed_stmt.where(TI.dag_id.in_(allowed_dags))
-
-    for row in session.execute(removed_stmt).all():
+    for row in removed:
+        map_index = row.get("map_index", -1)
+        task_id = row["task_id"]
+        run_id = row["dag_run_id"]
         items.append(
             RecycledItem(
-                key=f"task:{row.dag_id}/{row.run_id}/{row.task_id}/{row.map_index}",
+                key=f"task:{row['dag_id']}/{run_id}/{task_id}/{map_index}",
                 kind="task",
-                name=_image_name(row.task_id, row.map_index),
-                dag_id=row.dag_id,
-                run_id=row.run_id,
-                task_id=row.task_id,
-                map_index=row.map_index,
-                deleted_at=row.updated_at,
-                detail=" · ".join(bit for bit in [row.operator, row.run_id] if bit),
+                name=_image_name(task_id, map_index),
+                dag_id=row["dag_id"],
+                run_id=run_id,
+                task_id=task_id,
+                map_index=map_index,
+                # The task instance schema carries no ``updated_at``, so the last time
+                # the instance actually did anything stands in for when it was removed.
+                deleted_at=_dt(row.get("end_date") or row.get("start_date")),
+                detail=" · ".join(bit for bit in [row.get("operator"), run_id] if bit),
                 restorable=False,
             )
         )

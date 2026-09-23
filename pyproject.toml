@@ -27,11 +27,18 @@ Source = "https://github.com/roykoand/airflow-os-plugin"
 [project.entry-points."airflow.plugins"]
 airflow_os = "airflow_os.plugin:AirflowOSPlugin"
 
+# The built desktop bundle is gitignored, and hatchling reads .gitignore when deciding
+# what to package, so it has to be named explicitly. `artifacts` rather than a wheel
+# `force-include`, for two reasons: force-include of a path that does not exist is a
+# hard error, which made `pip install .` fail in a clean clone before the bundle was
+# built; and declaring it here rather than on the wheel target carries it through the
+# sdist too, so `python -m build` (which builds the wheel *from* the sdist) still ships
+# a desktop. A build with no bundle now succeeds and simply has no desktop in it.
+[tool.hatch.build]
+artifacts = ["src/airflow_os/www/dist/**"]
+
 [tool.hatch.build.targets.wheel]
 packages = ["src/airflow_os"]
-
-[tool.hatch.build.targets.wheel.force-include]
-"src/airflow_os/www/dist" = "airflow_os/www/dist"
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

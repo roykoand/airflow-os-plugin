@@ -15,11 +15,19 @@ transform draws as the stacked-frames box Paint uses for dynamic task
 mapping. The three HITL gates park the run: answer them from Human Input
 Required on the desktop, or leave them for the tray badge.
 
+It is also the load the Performance tab was written for. Each task holds its
+pool slot for a few seconds rather than returning instantly, and the layers are
+assigned to the narrow pools the demo seeds -- four Spark slots, two GPU slots,
+three rate-limited API slots. So a run puts real numbers on both graphs: CPU is
+running slots against ``core.parallelism``, Memory is occupied pool slots, and
+tasks genuinely queue waiting for a slot rather than sailing through.
+
 Trigger it from Run… — it is not scheduled, and it is not meant to be useful.
 """
 
 from __future__ import annotations
 
+import time
 from datetime import timedelta
 
 from airflow.providers.standard.operators.hitl import (
@@ -30,6 +38,23 @@ from airflow.providers.standard.operators.hitl import (
 from airflow.sdk import Param, dag, task
 
 SHARDS = list(range(8))
+
+#: How long a task holds its pool slot. Long enough that the Performance tab has
+#: something to draw and Paint catches tasks mid-flight with marching ants; short
+#: enough that the whole run still finishes while you are watching it.
+PACE_SECONDS = 6
+
+#: Layers are assigned to the pools the demo seeds, smallest where the work would
+#: really be scarcest. The narrow ones are the point: with four Spark slots and a
+#: dozen transforms wanting them, tasks queue, and Memory means something.
+POOLS = {
+    "intake": "api_rate_limited",   # 3 slots
+    "extract": "warehouse_pool",    # 8 slots
+    "validate": "snowflake_etl",    # 6 slots
+    "transform": "spark_cluster",   # 4 slots
+    "enrich": "ml_gpu",             # 2 slots
+    "publish": "notifications",     # 10 slots
+}
 
 
 @dag(
@@ -46,6 +71,8 @@ def airflow_os_demo_mega_pipeline():
         """Generic filler work: fold whatever upstream sent and pass a number on."""
         total = sum(value for value in signals if isinstance(value, (int, float)))
         print(f"processed {len(signals)} upstream signal(s), running total {total}")
+        # Holds the pool slot, so the desktop has a running process to show.
+        time.sleep(PACE_SECONDS)
         return total + 1
 
     @task
@@ -58,6 +85,7 @@ def airflow_os_demo_mega_pipeline():
     @task
     def transform_shard(base: int, shard: int) -> int:
         print(f"transforming shard {shard} against base {base}")
+        time.sleep(PACE_SECONDS)
         return base + shard
 
     @task
@@ -89,25 +117,35 @@ def airflow_os_demo_mega_pipeline():
         "intake_inventory",
         "intake_logs",
     ]
-    layer0 = [process.override(task_id=name)() for name in sensor_names]
+    layer0 = [process.override(task_id=name, pool=POOLS["intake"])() for name in sensor_names]
 
     # ---- layer 1: extract ------------------------------------------------------
     layer1 = [
-        process.override(task_id=f"extract_feed_{i:02d}")(*fan_in(layer0, i, (i % 3) + 1))
+        process.override(task_id=f"extract_feed_{i:02d}", pool=POOLS["extract"])(
+            *fan_in(layer0, i, (i % 3) + 1)
+        )
         for i in range(10)
     ]
 
     # ---- layer 2: validate ------------------------------------------------------
     layer2 = [
-        process.override(task_id=f"validate_batch_{i:02d}")(*fan_in(layer1, i, (i % 3) + 1))
+        process.override(task_id=f"validate_batch_{i:02d}", pool=POOLS["validate"])(
+            *fan_in(layer1, i, (i % 3) + 1)
+        )
         for i in range(12)
     ]
 
     # ---- layer 3: transform, including one dynamically mapped shard step ------
-    mapped = transform_shard.override(task_id="transform_shard").partial(base=layer2[0]).expand(shard=SHARDS)
+    mapped = (
+        transform_shard.override(task_id="transform_shard", pool=POOLS["transform"])
+        .partial(base=layer2[0])
+        .expand(shard=SHARDS)
+    )
     reduced = reduce_shards(mapped)
     layer3_filler = [
-        process.override(task_id=f"transform_stream_{i:02d}")(*fan_in(layer2, i, (i % 3) + 1))
+        process.override(task_id=f"transform_stream_{i:02d}", pool=POOLS["transform"])(
+            *fan_in(layer2, i, (i % 3) + 1)
+        )
         for i in range(12)
     ]
     # a couple of edges reach back two layers, just to tangle the picture
@@ -116,9 +154,13 @@ def airflow_os_demo_mega_pipeline():
     layer3 = [reduced, *layer3_filler]
 
     # ---- layer 4: enrich, including the fraud step that always fails ----------
-    failing = process_and_fail.override(task_id="enrich_fraud_scores")(*fan_in(layer3, 0, 2))
+    failing = process_and_fail.override(task_id="enrich_fraud_scores", pool=POOLS["enrich"])(
+        *fan_in(layer3, 0, 2)
+    )
     layer4_filler = [
-        process.override(task_id=f"enrich_signal_{i:02d}")(*fan_in(layer3, i, (i % 3) + 1))
+        process.override(task_id=f"enrich_signal_{i:02d}", pool=POOLS["enrich"])(
+            *fan_in(layer3, i, (i % 3) + 1)
+        )
         for i in range(13)
     ]
     layer4 = [failing, *layer4_filler]
@@ -178,14 +220,14 @@ def airflow_os_demo_mega_pipeline():
     layer6[2] >> rollout_gate
 
     # ---- layer 7: publish, two of which are branch-gated -----------------------
-    publish_dashboard_feed = process.override(task_id="publish_dashboard_feed")()
-    publish_alert_feed = process.override(task_id="publish_alert_feed")()
+    publish_dashboard_feed = process.override(task_id="publish_dashboard_feed", pool=POOLS["publish"])()
+    publish_alert_feed = process.override(task_id="publish_alert_feed", pool=POOLS["publish"])()
     branch >> [publish_dashboard_feed, publish_alert_feed]
 
-    publish_partner_feed = process.override(task_id="publish_partner_feed")(*fan_in(layer6, 0, 3))
-    publish_audit_trail = process.override(task_id="publish_audit_trail")(*fan_in(layer6, 1, 3))
-    publish_ml_features = process.override(task_id="publish_ml_features")(*fan_in(layer6, 2, 3))
-    publish_data_catalog = process.override(task_id="publish_data_catalog")(*fan_in(layer6, 3, 3))
+    publish_partner_feed = process.override(task_id="publish_partner_feed", pool=POOLS["publish"])(*fan_in(layer6, 0, 3))
+    publish_audit_trail = process.override(task_id="publish_audit_trail", pool=POOLS["publish"])(*fan_in(layer6, 1, 3))
+    publish_ml_features = process.override(task_id="publish_ml_features", pool=POOLS["publish"])(*fan_in(layer6, 2, 3))
+    publish_data_catalog = process.override(task_id="publish_data_catalog", pool=POOLS["publish"])(*fan_in(layer6, 3, 3))
     release_gate >> [publish_partner_feed, publish_audit_trail]
     region_gate >> publish_ml_features
     rollout_gate >> publish_data_catalog

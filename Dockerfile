@@ -27,7 +27,7 @@ FROM ${AIRFLOW_IMAGE}
 
 # The image runs as uid 50000 (airflow) and installs pip packages into its user site.
 # .gitignore comes along because hatchling reads it: it keeps the package walk from picking up
-# www/dist, which the wheel force-include then adds exactly once.
+# www/dist, which pyproject's `artifacts` then adds exactly once.
 COPY --chown=airflow:root pyproject.toml README.md LICENSE .gitignore /opt/airflow-os/
 COPY --chown=airflow:root src /opt/airflow-os/src
 COPY --from=ui --chown=airflow:root /build/ui/dist /opt/airflow-os/src/airflow_os/www/dist

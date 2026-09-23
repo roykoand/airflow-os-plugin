@@ -9,6 +9,7 @@
 #   AIRFLOW_OS_PORT            host port to publish on           (default 28080)
 #   AIRFLOW_OS_ADMIN_PASSWORD  admin password, used on first boot (default admin)
 #   AIRFLOW_OS_JWT_SECRET      api-server token signing key      (default: a fixed dev value)
+#   AIRFLOW_OS_FERNET_KEY      key encrypting Connections and Variables (default: a fixed dev value)
 #   ANTHROPIC_API_KEY          if set, becomes the anthropic_default connection for Clippy
 #   AIRFLOW_OS_SEED_DEMO       seed 20 demo Variables, 33 Connections and 8 Pools on first boot (default true)
 #   AIRFLOW_IMAGE              base image, e.g. apache/airflow:3.3.1-python3.12
@@ -29,6 +30,12 @@ services:
       # Fixed so browser sessions survive `docker compose restart`. Dev value; change it
       # if this box is ever reachable by anyone else.
       AIRFLOW__API_AUTH__JWT_SECRET: ${AIRFLOW_OS_JWT_SECRET:-airflow-os-local-dev-secret-not-for-production}
+      # Pinned for the same reason, and it matters more. `airflow standalone` generates a
+      # Fernet key into airflow.cfg, which lives in the image layer rather than the data
+      # volume - so `up --build` would hand a rebuilt container a brand new key while the
+      # volume still holds Connections encrypted with the old one, and every secret in the
+      # database would become undecryptable. Dev value; change it for anything real.
+      AIRFLOW__CORE__FERNET_KEY: ${AIRFLOW_OS_FERNET_KEY:-YWlyZmxvdy1vcy1sb2NhbC1kZXYtZmVybmV0LWtleTE=}
       AIRFLOW_OS_ADMIN_PASSWORD: ${AIRFLOW_OS_ADMIN_PASSWORD:-admin}
       ANTHROPIC_API_KEY: ${ANTHROPIC_API_KEY:-}
       AIRFLOW_OS_SEED_DEMO: ${AIRFLOW_OS_SEED_DEMO:-true}
