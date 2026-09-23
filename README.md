@@ -87,7 +87,9 @@ other task.
 He returns a headline, the likely cause, a suggested fix and a confidence, and refuses
 to invent a cause the log does not support.
 
-![Clippy triaging a real failure: he offers help, the triage dag runs, and he comes back with a headline, the likely cause and a suggested fix](docs/img/clippy.gif)
+<p align="center">
+  <img src="docs/img/clippy.gif" width="530" alt="Clippy triaging a real failure: he offers help, the triage dag runs, and he comes back with a headline, the likely cause and a suggested fix">
+</p>
 
 ### The stop screen
 
