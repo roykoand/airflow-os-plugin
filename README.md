@@ -1,8 +1,6 @@
 <div align="center">
 
-<img src="docs/img/pinwheel.svg" width="156" alt="">
-
-# Airflow OS
+<img src="docs/img/splash.svg" width="720" alt="Airflow OS">
 
 **A Windows 95 desktop for Apache Airflow 3.1+, shipped as a native plugin.**
 

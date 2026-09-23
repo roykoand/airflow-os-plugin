@@ -1,7 +1,9 @@
 # README images
 
-`icons.svg` and `pinwheel.svg` are generated from source, so they cannot drift from
-what the desktop actually renders. Regenerate them with `scripts/gen-assets.mjs`.
+`icons.svg`, `pinwheel.svg` and `splash.svg` are generated from source, so they cannot
+drift from what the desktop actually renders. Regenerate them with `scripts/gen-assets.mjs`.
+The splash is the README's masthead: the boot screen's sky, pinwheel and wordmark as one
+animated SVG, since GitHub keeps declarative animation when it renders an image.
 
 The screenshots below have to be taken by hand. Sizes are suggestions — what matters
 is that no window is cropped and the taskbar is visible, since it is part of the joke.
