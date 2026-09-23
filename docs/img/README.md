@@ -11,6 +11,7 @@ is that no window is cropped and the taskbar is visible, since it is part of the
 | File | Shot | Notes |
 | --- | --- | --- |
 | `desktop.png` | The whole desktop, wide | Two or three windows open and overlapping. This is the hero image; make it the best one. |
+| `boot.png` | The boot screen | Reload the plugin page and catch it while the bar is sweeping. Crop the browser toolbar off. |
 | `taskmanager.png` | Task Manager, Processes tab | Trigger a few dags first so the list is full and the CPU column has numbers. |
 | `explorer.png` | Explorer at `C:\<dag>\<run>` | Deep enough to show the folder metaphor working. |
 | `clippy.png` | Clippy showing a verdict | Needs a model connection. Run `airflow_os_demo_failure` first. |
