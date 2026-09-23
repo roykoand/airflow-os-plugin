@@ -57,7 +57,13 @@ function pinwheel() {
   const src = readFileSync(LOGO_SRC, "utf8");
   // Key order inside each entry is whatever the formatter last chose, so parse fields
   // individually rather than assuming a shape.
+  // The README's pinwheel turns like the boot splash does. SMIL rather than CSS because
+  // GitHub serves README images through a proxy and renders them in <img>, where scripts
+  // are dropped but declarative animation survives. Same 3.4s period as .aos-splash-logo.
   let out = '<svg xmlns="http://www.w3.org/2000/svg" width="120" height="120" viewBox="0 0 175 175">\n';
+  out += "<g>\n";
+  out +=
+    '<animateTransform attributeName="transform" type="rotate" from="0 87.5 87.5" to="360 87.5 87.5" dur="3.4s" repeatCount="indefinite"/>\n';
   let count = 0;
   for (const [, entry] of src.matchAll(/^ {2}\{ (.+) \},$/gm)) {
     const d = /d: "([^"]+)"/.exec(entry)?.[1];
@@ -68,7 +74,7 @@ function pinwheel() {
     count += 1;
   }
   if (count !== 8) throw new Error(`expected 8 logo paths, parsed ${count}`);
-  writeFileSync("docs/img/pinwheel.svg", `${out}</svg>\n`);
+  writeFileSync("docs/img/pinwheel.svg", `${out}</g>\n</svg>\n`);
   return count;
 }
 
