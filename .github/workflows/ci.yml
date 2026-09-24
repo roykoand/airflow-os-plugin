@@ -40,6 +40,18 @@ jobs:
       # absence, so the package installs without it; the tests below do not need it.
       - run: pip install -e ".[dev]"
       - run: ruff check src dags tests
-      # Tests that need a metadata database skip themselves when there is none.
-      - run: pytest -q
+
+      # Parsing a dag touches the `dag` table, so the suite needs a database even
+      # though none of it is about persistence. SQLite in a temp AIRFLOW_HOME is
+      # enough, and it means the dag tests really run here instead of skipping.
+      - name: Create a metadata database
+        run: airflow db migrate
+        env:
+          AIRFLOW_HOME: ${{ runner.temp }}/airflow
+
+      - name: Tests
+        run: pytest -q
+        env:
+          AIRFLOW_HOME: ${{ runner.temp }}/airflow
+
       - run: pip install build && python -m build
