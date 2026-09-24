@@ -11,8 +11,6 @@
 
 </div>
 
-![The Airflow OS desktop inside the Airflow UI: icons for Task Manager, Explorer, Human Input Required, Deadlines, Recycle Bin, Paint and the MS-DOS Prompt, with Clippy offering to triage a failed run](docs/img/desktop.png)
-
 ---
 
 ## What it is for
@@ -59,6 +57,8 @@ being a skin over Airflow and becomes a *reading* of it.
 ---
 
 ## What's on the desktop
+
+![The Airflow OS desktop inside the Airflow UI: icons for Task Manager, Explorer, Human Input Required, Deadlines, Recycle Bin, Paint and the MS-DOS Prompt, with Clippy offering to triage a failed run](docs/img/desktop.png)
 
 ### Task Manager
 
@@ -262,8 +262,9 @@ public REST API, so nothing bypasses permissions.
 
 ## Which Airflow 3 features this uses
 
-Every window is a feature of Airflow 3 that had no picture before. Where a feature is
-new in a specific release, that is noted.
+The parts that are specific to Airflow 3, and what each one turned into. Task mapping,
+pools, trigger rules, XCom and the audit log are all in here too, but they long predate
+Airflow 3 and are not what this is about.
 
 | Airflow feature | Where it shows up | In the code |
 | --- | --- | --- |
@@ -272,58 +273,8 @@ new in a specific release, that is noted.
 | **Deadlines** — `DeadlineAlert`, `DeadlineReference.DAGRUN_QUEUED_AT`, `AsyncCallback` | The Deadlines mailbox. The public REST API has no deadline endpoints, so this is the only view in the plugin that reads the metadata database | `dags/airflow_os_demo_deadline.py`, `src/airflow_os/kernel.py` |
 | **`@task.llm`** via the Common AI provider | Clippy. Triage runs as a real dag you can watch in Task Manager, so the reasoning is logged, retryable and auditable | `dags/airflow_os_clippy.py` |
 | **REST API v2, with the `~` wildcard** | Nearly every read. `/dags/~/dagRuns/~/taskInstances` is the process table; `/dags/~/dagRuns/~/hitlDetails` is the inbox | `src/airflow_os/rest.py` |
-| **Dynamic task mapping** | Paint draws a mapped task as a stack of frames with its instance count; Explorer gives each index its own folder | `dags/airflow_os_demo_heartbeat.py` |
-| **Pools and `priority_weight`** | Task Manager's Memory column is occupied pool slots; the Priority column buckets `priority_weight` into Win95 priority classes | `src/airflow_os/kernel.py` |
-| **`core.parallelism`** | The CPU graph: running slots against parallelism | `src/airflow_os/kernel.py` |
-| **`@continuous` schedule** | The heartbeat dag, so Task Manager always has live processes | `dags/airflow_os_demo_heartbeat.py` |
-| **`trigger_rule`, `@task.branch`** | Paint's dithered `upstream_failed` and olive `skipped` — the states a branch and a strict trigger rule produce | `dags/airflow_os_demo_mega_pipeline.py` |
 | **`DagModel.is_stale`** | The Recycle Bin. Deleting a dag file keeps the record and all its history | `src/airflow_os/kernel.py` |
-| **`doc_md`** | Airflow Help renders it as a book whose pages are the tasks | `ui/src/os/apps/WinHelp.tsx` |
-| **XCom** | Explorer shows each task's XComs as files; Notepad opens the deserialised value | `src/airflow_os/kernel.py` |
-| **Task logs** | Notepad streams them from the core log endpoint, so it inherits the configured log handler | `ui/src/os/api/client.ts` |
-| **Audit log** (`/eventLogs`) | Event Viewer | `ui/src/os/api/client.ts` |
 | **Task SDK boundary** | The constraint that shaped Clippy: task code has neither database access nor a credential of its own, so evidence is gathered in the api-server and passed in `dag_run.conf` | `dags/airflow_os_clippy.py` |
-
----
-
-## The icons
-
-All 34 icons are hand-drawn pixel art — no icon set, no image files. Each is a 16×16
-character grid mapped through a shared palette and emitted as `<rect>` runs, so they
-stay crisp at any size and can be recoloured in code.
-
-![Every icon in Airflow OS](docs/img/icons.svg)
-
-```
-"................",
-"..kkkk..........",     k = outline    y = folder yellow
-".kyyyyk.........",     Y = shade      . = transparent
-".kyyyyykkkkkkk..",
-".kyyyyyyyyyyyk..",
-"..kkkkkkkkkkk...",
-```
-
-## The sound scheme
-
-Ten sounds, all synthesised from Web Audio oscillators at play time. **There is not a
-single audio file in this repository** — the host UI dynamically imports this bundle,
-and a megabyte of base64 WAV in it would be rude.
-
-| Event | Sound |
-| --- | --- |
-| The boot splash is up | air: four noise bands sweeping upward, the gust that turns the pinwheel |
-| The desktop appears | a logon click — a switch closing, not a chime |
-| A task instance succeeds | ta-da |
-| A task instance fails | Critical Stop, four notes falling away |
-| A dag run is triggered | dial-up: three real DTMF tones, then a carrier over filtered noise |
-| Dialogs | Asterisk, Exclamation or Question, by severity |
-| Clippy has something to say | a menu-popup ding |
-| Shutdown | the startup chord, reversed |
-
-Task sounds fire on **transitions**, not absolute state, so a backlog of old failures
-stays quiet, and at most one plays per poll so a mapped-task fan-out sounds like an
-event rather than an avalanche. Toggle from the speaker in the tray, or audition
-everything in **Control Panel → Sounds**.
 
 ---
 
@@ -393,21 +344,6 @@ airflow variables set airflow_os_llm_model_id "anthropic:claude-sonnet-5"
 Without a connection Clippy degrades honestly: he still gathers and reports the
 evidence, and says the model call could not be made.
 
-### Demo dags
-
-| Dag | Schedule | For |
-| --- | --- | --- |
-| `airflow_os_demo_failure` | manual | A price feed where one vendor reports `"n/a"` — a real `ValueError` for the stop screen and Clippy |
-| `airflow_os_demo_deadline` | manual | Deliberately slower than its own 30-second deadline |
-| `airflow_os_demo_nightly_load` | every 20 min | The scheduled version: a missed deadline per interval, so the mailbox keeps filling |
-| `airflow_os_demo_hitl` | hourly | Three human-in-the-loop requests at once, one per request shape. Defaults and a 55-minute timeout keep it from failing when nobody answers |
-| `airflow_os_demo_heartbeat` | `@continuous` | Three mapped shards always polling, so Task Manager always has processes with an honest CPU column |
-| `airflow_os_demo_mega_pipeline` | manual | Eighty-eight tasks in ten layers, built so Paint has something worth painting. Every colour in the colour box appears in one run |
-| `airflow_os_clippy` | manual | The triage dag itself |
-
-The Docker container triggers the failure, HITL and nightly-load dags once on first
-boot, so every icon has something behind it before you open the desktop.
-
 ### Running on a non-default port
 
 If you move the api-server off 8080, move the **Task Execution API** with it, or every
@@ -422,31 +358,6 @@ export AIRFLOW__CORE__EXECUTION_API_SERVER_URL=http://localhost:28080/execution/
 The symptom is distinctive: tasks go straight to `failed` with a log of a few hundred
 bytes containing only `Pre Execute`, and the scheduler logs
 `httpcore.ConnectError: [Errno 61] Connection refused`.
-
-## Develop
-
-```bash
-cd ui && pnpm install && pnpm dev    # :5173, proxies /airflow-os, /api/v2 and /auth to :28080
-```
-
-Point it elsewhere with `AIRFLOW_OS_API_URL`. **System Properties** shows the bundle's
-build time next to the server's, so a browser serving a cached bundle says so instead
-of looking like a missing feature.
-
-```bash
-cd ui && pnpm test                   # vitest: Paint's layout and bitmap encoder, the menu bar, Alt+Tab
-docker compose exec airflow-os pytest /opt/airflow-os/tests         # pytest: kernel helpers and permission filtering
-AIRFLOW_OS_URL=http://localhost:28080 pytest tests/integration      # smoke test over HTTP
-```
-
-The Python tests run inside the container because that is where a real Airflow and a
-populated metadata database are. The permission tests cover the seam the desktop reads
-through: a request with no credential is refused, the caller's own credential goes out on
-every call, a refusal comes back as a refusal rather than an empty window, and Control
-Panel drops the secrets the API is willing to hand over. Deadlines, still read from the
-database, keep the older test that hands the kernel an allow-list of one dag.
-
----
 
 ## Architecture
 
@@ -503,18 +414,6 @@ Secrets are dropped on the way through. `/api/v2` will hand a privileged caller 
 connection's password and `extra` and a variable's value; Control Panel lists names and
 shapes, so it discards them rather than sending them to a browser that has no use for
 them.
-
-### What Airflow 3 dictated
-
-The most instructive constraint: **task code has no metadata DB access**.
-`create_session()` in a task raises `Session must be set before!`, because tasks run
-under the Task SDK and reach the scheduler over the Task Execution API.
-
-That is why Clippy is shaped the way it is. The plugin — in the api-server, which can
-reach the REST API as the person who clicked — gathers the evidence; the desktop passes
-it to the dag in `dag_run.conf`; the dag is purely the `@task.llm` call. The agentic
-step lives where it is auditable, and the gathering lives where the permission checks
-are.
 
 ### No UI dependencies
 
