@@ -144,6 +144,32 @@ records for real, refusing any dag whose file is still present.
 
 ![The Recycle Bin: a decommissioned dag, stale because its file was deleted, still holding its runs and logs](docs/img/recyclebin.png)
 
+### Control Panel
+
+Five applets, and three of them are Airflow's own furniture under a different name.
+
+| Applet | Is |
+| --- | --- |
+| **System (Pools)** | The memory manager. Slots in use against total, and whether the pool counts deferred tasks |
+| **Registry (Variables)** | Keys, descriptions and whether each is encrypted |
+| **Dial-Up Networking** | Connections: type, host, schema, login, port |
+| **Sounds** | The scheme, with every sound auditionable |
+| **Display** | Whether a failed task raises the stop screen, and a **Test** button that raises one on demand |
+
+Read-only, deliberately. Editing a Connection belongs in Airflow's own UI, where the
+audit trail is. And the two applets that show secrets do not: **Variable values and
+Connection passwords and `extra` are dropped in the kernel and never sent to the
+browser at all.** The REST API will hand a sufficiently privileged caller all three;
+Control Panel lists names and shapes, so it throws them away before they leave the
+api-server.
+
+### Event Viewer
+
+Airflow's audit log, in the window Windows kept it in: a list nobody reads until
+something breaks, and then the only thing worth reading. Who triggered that dag run,
+who cleared that task, who answered that human-in-the-loop request. Filterable, and
+it refreshes on its own.
+
 ### Airflow Help
 
 A dag is a book, its tasks are the pages. Renders the `doc_md` you have already
