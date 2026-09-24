@@ -1,6 +1,6 @@
 # Airflow OS, isolated from any Airflow already installed on this machine.
 #
-#   docker compose up --build -d     # build + start;   http://localhost:28080  (admin / admin)
+#   docker compose up                # build + start;   http://localhost:28080  (admin / admin)
 #   docker compose logs -f           # follow the scheduler / api-server output
 #   docker compose down              # stop; state is kept in the airflow-os-data volume
 #   docker compose down -v           # stop and wipe the metadata db, logs and password

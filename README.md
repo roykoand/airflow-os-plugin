@@ -11,7 +11,6 @@
 
 </div>
 
----
 
 ## What it is for
 
@@ -65,12 +64,15 @@ being a skin over Airflow and becomes a *reading* of it.
 Ctrl+Alt+Del for your scheduler. **Applications** are dag runs, **Processes** are task
 instances, **Performance** graphs parallelism and pool-slot utilisation.
 
-The CPU column is real: it is how far through its own historical mean duration a task
-has got, so a task 30 seconds into a job that normally takes 60 reads as 50%. Tasks
-with no history report nothing rather than a guess.
+The CPU column is a progress bar in disguise. It compares how long a task has been
+running with how long its recent successful runs took, so a task 30 seconds into a job
+that usually takes a minute shows 50%. A task that has never succeeded has nothing to
+compare against, so it sits at 0% rather than guessing.
 
-**End Process** fails the task instance — and deliberately does not cascade to
-downstream tasks, because Windows 95 did not ask permission either.
+**End Process** kills one task instance, after the classic *"Terminating a process can
+cause undesired results including loss of data"* warning. It marks that task `failed`
+and touches nothing else. Downstream tasks then react the way they would to any
+failure, through their own trigger rules.
 
 ![Task Manager, Applications tab: dag runs listed as Finished or Not responding](docs/img/taskmanager.png)
 
@@ -196,12 +198,16 @@ browser at all.** The REST API will hand a sufficiently privileged caller all th
 Control Panel lists names and shapes, so it throws them away before they leave the
 api-server.
 
+![Control Panel, the System tab: every pool with its slots in use against total, whether it counts deferred tasks, and its description](docs/img/controlpanel.png)
+
 ### Event Viewer
 
 Airflow's audit log, in the window Windows kept it in: a list nobody reads until
 something breaks, and then the only thing worth reading. Who triggered that dag run,
 who cleared that task, who answered that human-in-the-loop request. Filterable, and
 it refreshes on its own.
+
+![Event Viewer: 100 of 1639 audit events, each with its type, time, event, dag, task and user](docs/img/eventviewer.png)
 
 ### Airflow Help
 
@@ -281,34 +287,27 @@ Airflow 3 and are not what this is about.
 ## Install
 
 ```bash
-./scripts/build.sh          # build the React bundle and stage it into the package
-pip install -e .            # registers via the `airflow.plugins` entry point
-airflow api-server          # restart so the plugin is picked up
+git clone https://github.com/roykoand/airflow-os-plugin && cd airflow-os-plugin
+docker compose up
 ```
 
-Then open **Airflow OS** in the Airflow nav, or go straight to `/airflow-os`.
+Open **http://localhost:28080**, log in with **admin / admin**, and click
+**Airflow OS** in the nav. The first build takes a few minutes.
+
+It needs nothing but Docker: the image builds the React bundle, installs the plugin into
+the official `apache/airflow` image and boots `airflow standalone` on SQLite, published
+on **28080** so it cannot collide with an Airflow on 8080.
 
 ![The boot screen: the pinwheel and wordmark over a sky, with the Airflow version, dag count and scheduler status under the progress bar](docs/img/boot.png)
 
-### Or run it in Docker
-
-If a different Airflow already lives on this machine, run Airflow OS in its own
-container instead. It needs nothing but Docker: the image builds the React bundle,
-installs the plugin into the official `apache/airflow` image and boots
-`airflow standalone` on SQLite, published on **28080** so it cannot collide with an
-Airflow on 8080.
-
 ```bash
-docker compose up --build -d        # first build takes a few minutes
-open http://localhost:28080         # log in with admin / admin, then open Airflow OS
-docker compose logs -f              # scheduler and api-server output
 docker compose down                 # stop; the metadata db and logs persist in a volume
 docker compose down -v              # stop and start from scratch next time
 ```
 
 `./dags` is bind-mounted, so editing a demo dag needs no rebuild. Python or UI changes
-do: `docker compose up --build -d` again. Settings, all optional, go in the shell or a
-`.env` file next to `docker-compose.yml`:
+do: `docker compose up --build`. Settings, all optional, go in the shell or a `.env` file
+next to `docker-compose.yml`:
 
 | Variable | Default | |
 | --- | --- | --- |
@@ -320,51 +319,31 @@ do: `docker compose up --build -d` again. Settings, all optional, go in the shel
 | `AIRFLOW_OS_JWT_SECRET` | a fixed dev value | Token signing key; change it if the box is reachable by others |
 | `AIRFLOW_OS_FERNET_KEY` | a fixed dev value | Encrypts Connections and Variables. Pinned because `airflow standalone` writes a generated key into `airflow.cfg`, which is not in the data volume — so a rebuilt container would otherwise get a new key and be unable to decrypt its own secrets |
 
-Without Compose: `docker build -t airflow-os . && docker run --rm -p 28080:8080 airflow-os`.
-
 ### Clippy needs a model
 
-The generic `pydanticai` conn type works for Anthropic — the hook passes
-`conn.password` to whichever provider the model string names:
+Give it an Anthropic key and he works out of the box:
 
 ```bash
-airflow connections add anthropic_default \
-  --conn-type pydanticai \
-  --conn-password "$ANTHROPIC_API_KEY"
+ANTHROPIC_API_KEY=sk-ant-... docker compose up
 ```
 
-Override with Airflow Variables (read through Jinja, so the lookup happens per task run
-rather than on every dag-processor parse loop):
+The key becomes the `anthropic_default` connection, using the generic `pydanticai` conn
+type. To point Clippy at another connection or model, set two Airflow Variables (read
+through Jinja, so the lookup happens per task run rather than on every dag-processor
+parse loop):
 
 ```bash
-airflow variables set airflow_os_llm_conn_id  my_llm_conn
-airflow variables set airflow_os_llm_model_id "anthropic:claude-sonnet-5"
+docker compose exec airflow-os airflow variables set airflow_os_llm_conn_id  my_llm_conn
+docker compose exec airflow-os airflow variables set airflow_os_llm_model_id "anthropic:claude-sonnet-5"
 ```
 
 Without a connection Clippy degrades honestly: he still gathers and reports the
 evidence, and says the model call could not be made.
 
-### Running on a non-default port
-
-If you move the api-server off 8080, move the **Task Execution API** with it, or every
-task dies before writing a log line:
-
-```bash
-export AIRFLOW__API__PORT=28080
-export AIRFLOW__API__BASE_URL=http://localhost:28080
-export AIRFLOW__CORE__EXECUTION_API_SERVER_URL=http://localhost:28080/execution/
-```
-
-The symptom is distinctive: tasks go straight to `failed` with a log of a few hundred
-bytes containing only `Pre Execute`, and the scheduler logs
-`httpcore.ConnectError: [Errno 61] Connection refused`.
-
 ## Architecture
 
-~2,300 lines of Python, ~9,400 of TypeScript. Nothing patches or forks Airflow.
-
 ```
-pip install -e .
+pip install  (the Dockerfile does this)
    └─ pyproject entry point:  [airflow.plugins] airflow_os = "airflow_os.plugin:AirflowOSPlugin"
         └─ api-server imports the plugin and reads two attributes:
 
@@ -414,20 +393,6 @@ Secrets are dropped on the way through. `/api/v2` will hand a privileged caller 
 connection's password and `extra` and a variable's value; Control Panel lists names and
 shapes, so it discards them rather than sending them to a browser that has no use for
 them.
-
-### No UI dependencies
-
-No React95, no styled-components, no component library, no icon set, no markdown
-library, no query library. The window manager, the 1,298 lines of Win95 CSS, the 34
-pixel icons, the sound scheme and the Markdown renderer are all first-party — which
-keeps the dynamically-imported bundle at **160 kB** (46 kB gzipped) and avoids shipping
-a second CSS-in-JS runtime alongside the host's Emotion.
-
-The Markdown renderer emits React elements rather than an HTML string. That is a
-security decision: `doc_md` is authored by whoever writes the dag, and injecting it as
-HTML would hand them a script tag in another user's Airflow session.
-
----
 
 ## Licence
 
