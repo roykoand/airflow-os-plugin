@@ -38,7 +38,9 @@ jobs:
           python-version: "3.12"
       # The desktop bundle is not committed. `artifacts` in pyproject tolerates its
       # absence, so the package installs without it; the tests below do not need it.
-      - run: pip install -e ".[dev]"
+      # `ai` as well as `dev`: the Clippy dag imports @task.llm from the Common AI
+      # provider, so without it that dag fails to parse and the dag tests fail with it.
+      - run: pip install -e ".[dev,ai]"
       - run: ruff check src dags tests
 
       # Parsing a dag touches the `dag` table, so the suite needs a database even
