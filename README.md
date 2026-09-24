@@ -7,8 +7,28 @@
 [![Airflow 3.1+](https://img.shields.io/badge/Apache%20Airflow-3.1%2B-017CEE?logo=apacheairflow&logoColor=white)](https://airflow.apache.org)
 [![License](https://img.shields.io/badge/license-Apache%202.0-blue)](LICENSE)
 [![Python 3.10+](https://img.shields.io/badge/python-3.10%2B-3776AB?logo=python&logoColor=white)](https://python.org)
+[![CI](https://github.com/roykoand/airflow-os-plugin/actions/workflows/ci.yml/badge.svg)](https://github.com/roykoand/airflow-os-plugin/actions/workflows/ci.yml)
 
 </div>
+
+![The Airflow OS desktop inside the Airflow UI: icons for Task Manager, Explorer, Human Input Required, Deadlines, Recycle Bin, Paint and the MS-DOS Prompt, with Clippy offering to triage a failed run](docs/img/desktop.png)
+
+---
+
+## What it is for
+
+A desktop is a way of reading a system, and Windows 95's reading happens to fit
+Airflow's almost exactly. Three things come out of taking that seriously:
+
+- **It teaches the model.** Pools are a bounded resource tasks contend for, so they are
+  memory. A dag run is a folder of task instances, so it browses. People who already
+  know what a process table and a recycle bin mean can read Airflow's data model without
+  being taught its vocabulary first.
+- **It answers deployment-wide questions Airflow's UI asks you to go looking for.**
+  Everything in flight, everything waiting on a human, and everything that missed a
+  deadline, each in one window, across every dag at once.
+- **It puts the agent inside the pipeline.** Clippy's triage is a real dag run — logged,
+  retryable, auditable — not a chat box bolted to the side of one.
 
 ---
 
@@ -40,8 +60,6 @@ being a skin over Airflow and becomes a *reading* of it.
 
 ## What's on the desktop
 
-![The Airflow OS desktop inside the Airflow UI: icons for Task Manager, Explorer, Human Input Required, Deadlines, Recycle Bin, Paint and the MS-DOS Prompt, with Clippy offering to triage a failed run](docs/img/desktop.png)
-
 ### Task Manager
 
 Ctrl+Alt+Del for your scheduler. **Applications** are dag runs, **Processes** are task
@@ -62,7 +80,7 @@ downstream tasks, because Windows 95 did not ask permission either.
 
 ### Explorer, and Notepad
 
-The metadata database as a drive:
+Airflow's own object graph, as a drive:
 
 ```
 C:\<dag_id>\<run_id>\<task_id>\{stdout.log, xcom\, details.json}
@@ -86,6 +104,13 @@ other task.
 
 He returns a headline, the likely cause, a suggested fix and a confidence, and refuses
 to invent a cause the log does not support.
+
+**What leaves your deployment.** The payload is bounded and deliberate: the task's log
+tail, its state, operator, try count, duration, pool, queue and hostname, and the states
+of its siblings in the run. It is still task log content, and it goes to whichever
+provider `airflow_os_llm_model_id` names. Point the connection at a self-hosted model if
+that matters where you work, or leave it unset — Clippy then gathers the same evidence,
+shows it, and says the model was never called.
 
 <p align="center">
   <img src="docs/img/clippy.gif" width="530" alt="Clippy triaging a real failure: he offers help, the triage dag runs, and he comes back with a headline, the likely cause and a suggested fix">
@@ -113,6 +138,10 @@ Airflow 3.1's HITL operators park a task until a person answers, which is the ex
 shape of a Windows message box: a subject, some body text, and a row of buttons. So the
 operator's `options` **become** the buttons.
 
+Airflow has its own Required Actions page for these. This is not a missing feature
+being filled in; it is the same requests read as what they structurally are — a modal
+dialog that has stopped the machine until somebody clicks something.
+
 All three request shapes work — a single choice, a multiple choice (checkboxes seeded
 from `defaults`), and a request for values (`params`, sent back with original types
 preserved). Pending count is badged on the desktop icon and in the system tray, where
@@ -122,14 +151,18 @@ Windows 95 would actually have put it.
 
 ### Deadlines
 
-Airflow 3 deadlines are the feature nobody can see. You declare one on a dag — *this
-run must finish within 30 seconds of being queued, and call this function if it
-doesn't* — and the scheduler enforces it. But **deadlines have no REST API at all**
-(`grep -c deadline` on the OpenAPI spec returns `0`), so no UI anywhere displays them.
+You declare a deadline on a dag — *this run must finish within 30 seconds of being
+queued, and call this function if it doesn't* — and the scheduler enforces it.
 
-The mailbox reads the `deadline` and `deadline_alert` tables through the kernel, which
-makes this window the only place a deadline is visible. A missed deadline is unread
-mail: bold, flag up.
+**The public REST API knows nothing about them.** `grep -c deadline` on the `/api/v2`
+OpenAPI spec returns `0`, which is why this is the one window in Airflow OS that reads
+the metadata database directly: it opens the `deadline` and `deadline_alert` tables
+because there is no endpoint to ask instead. Airflow's own UI reaches them through a
+private route that is not part of the public API surface.
+
+What the mailbox adds is the reading, not the access. A deadline is a promise about
+time that something either kept or broke, which is mail: a missed one arrives bold with
+its flag up, and the count sits on the desktop icon until you look.
 
 ![Deadlines: a mailbox of missed 30-second deadlines from the nightly load, with the selected one showing its interval, callback and dag run](docs/img/deadlines.png)
 
@@ -236,7 +269,7 @@ new in a specific release, that is noted.
 | --- | --- | --- |
 | **Plugin external views** — `fastapi_apps` + `react_apps` (3.1) | The whole desktop: a mounted FastAPI app and a dynamically imported React bundle, with a nav entry | `src/airflow_os/plugin.py` |
 | **Human-in-the-loop operators** (3.1) — `ApprovalOperator`, `HITLOperator`, `HITLEntryOperator` | Human Input Required. The operator's `options` *become* the message-box buttons; all three request shapes work | `dags/airflow_os_demo_hitl.py` |
-| **Deadlines** — `DeadlineAlert`, `DeadlineReference.DAGRUN_QUEUED_AT`, `AsyncCallback` | The Deadlines mailbox. **No REST API and no other UI displays these at all**, so this is the only place a deadline is visible | `dags/airflow_os_demo_deadline.py`, `src/airflow_os/kernel.py` |
+| **Deadlines** — `DeadlineAlert`, `DeadlineReference.DAGRUN_QUEUED_AT`, `AsyncCallback` | The Deadlines mailbox. The public REST API has no deadline endpoints, so this is the only view in the plugin that reads the metadata database | `dags/airflow_os_demo_deadline.py`, `src/airflow_os/kernel.py` |
 | **`@task.llm`** via the Common AI provider | Clippy. Triage runs as a real dag you can watch in Task Manager, so the reasoning is logged, retryable and auditable | `dags/airflow_os_clippy.py` |
 | **REST API v2, with the `~` wildcard** | Nearly every read. `/dags/~/dagRuns/~/taskInstances` is the process table; `/dags/~/dagRuns/~/hitlDetails` is the inbox | `src/airflow_os/rest.py` |
 | **Dynamic task mapping** | Paint draws a mapped task as a stack of frames with its instance count; Explorer gives each index its own folder | `dags/airflow_os_demo_heartbeat.py` |
@@ -249,7 +282,7 @@ new in a specific release, that is noted.
 | **XCom** | Explorer shows each task's XComs as files; Notepad opens the deserialised value | `src/airflow_os/kernel.py` |
 | **Task logs** | Notepad streams them from the core log endpoint, so it inherits the configured log handler | `ui/src/os/api/client.ts` |
 | **Audit log** (`/eventLogs`) | Event Viewer | `ui/src/os/api/client.ts` |
-| **Task SDK boundary** | The constraint that shaped Clippy: task code cannot reach the metadata database, so evidence is gathered in the api-server and passed in `dag_run.conf` | `dags/airflow_os_clippy.py` |
+| **Task SDK boundary** | The constraint that shaped Clippy: task code has neither database access nor a credential of its own, so evidence is gathered in the api-server and passed in `dag_run.conf` | `dags/airflow_os_clippy.py` |
 
 ---
 

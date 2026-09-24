@@ -1,0 +1,45 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  ui:
+    name: Desktop bundle
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 10
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: pnpm
+          cache-dependency-path: ui/pnpm-lock.yaml
+      - run: pnpm install --frozen-lockfile
+        working-directory: ui
+      - run: pnpm lint
+        working-directory: ui
+      - run: pnpm test --run
+        working-directory: ui
+      - run: pnpm build
+        working-directory: ui
+
+  plugin:
+    name: Plugin
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      # The desktop bundle is not committed. `artifacts` in pyproject tolerates its
+      # absence, so the package installs without it; the tests below do not need it.
+      - run: pip install -e ".[dev]"
+      - run: ruff check src dags tests
+      # Tests that need a metadata database skip themselves when there is none.
+      - run: pytest -q
+      - run: pip install build && python -m build

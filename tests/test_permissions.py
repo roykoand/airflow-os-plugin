@@ -24,9 +24,10 @@ import json
 
 import httpx
 import pytest
+from fastapi import HTTPException
+
 from airflow_os import kernel
 from airflow_os.rest import Rest, credential_from
-from fastapi import HTTPException
 
 TOKEN = "Bearer test-token-for-the-caller"
 

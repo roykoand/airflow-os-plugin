@@ -20,6 +20,7 @@ from datetime import timedelta
 
 from airflow.sdk import DAG, DeadlineAlert, DeadlineReference
 from airflow.sdk.definitions.deadline import AsyncCallback
+
 from airflow_os.demo_callbacks import deadline_missed
 
 with DAG(

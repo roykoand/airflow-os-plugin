@@ -13,6 +13,7 @@ from datetime import timedelta
 
 from airflow.sdk import DAG, DeadlineAlert, DeadlineReference, task
 from airflow.sdk.definitions.deadline import AsyncCallback
+
 from airflow_os.demo_callbacks import escalate
 
 with DAG(

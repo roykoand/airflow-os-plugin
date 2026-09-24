@@ -163,7 +163,7 @@ def airflow_os_demo_mega_pipeline():
         )
         for i in range(13)
     ]
-    layer4 = [failing, *layer4_filler]
+    # (the enrich layer as a whole is never referenced again; layer4_filler is)
 
     # ---- layer 5: aggregate, including the one strict upstream_failed leaf ----
     # demonstrates upstream_failed: default trigger rule, real data dependency on `failing`
@@ -224,10 +224,18 @@ def airflow_os_demo_mega_pipeline():
     publish_alert_feed = process.override(task_id="publish_alert_feed", pool=POOLS["publish"])()
     branch >> [publish_dashboard_feed, publish_alert_feed]
 
-    publish_partner_feed = process.override(task_id="publish_partner_feed", pool=POOLS["publish"])(*fan_in(layer6, 0, 3))
-    publish_audit_trail = process.override(task_id="publish_audit_trail", pool=POOLS["publish"])(*fan_in(layer6, 1, 3))
-    publish_ml_features = process.override(task_id="publish_ml_features", pool=POOLS["publish"])(*fan_in(layer6, 2, 3))
-    publish_data_catalog = process.override(task_id="publish_data_catalog", pool=POOLS["publish"])(*fan_in(layer6, 3, 3))
+    publish_partner_feed = process.override(task_id="publish_partner_feed", pool=POOLS["publish"])(
+        *fan_in(layer6, 0, 3)
+    )
+    publish_audit_trail = process.override(task_id="publish_audit_trail", pool=POOLS["publish"])(
+        *fan_in(layer6, 1, 3)
+    )
+    publish_ml_features = process.override(task_id="publish_ml_features", pool=POOLS["publish"])(
+        *fan_in(layer6, 2, 3)
+    )
+    publish_data_catalog = process.override(task_id="publish_data_catalog", pool=POOLS["publish"])(
+        *fan_in(layer6, 3, 3)
+    )
     release_gate >> [publish_partner_feed, publish_audit_trail]
     region_gate >> publish_ml_features
     rollout_gate >> publish_data_catalog

@@ -6,13 +6,21 @@ The desktop collects the evidence for a failed task instance - the tail of its l
 its metadata, and the states of its siblings in the run - and triggers this dag with
 that payload in ``dag_run.conf``. The dag turns it into an explanation.
 
-Why the evidence arrives in ``conf`` rather than being gathered here: Airflow 3 task
-code has no metadata database access. Tasks run under the Task SDK and reach the
-scheduler over the Task Execution API, so ``create_session()`` inside a task raises
-``RuntimeError: Session must be set before!``. The Airflow OS plugin runs inside the
-api-server, which does have DB access, so it does the collecting (and the permission
-checks that go with reading someone's logs). That leaves this dag as purely the
-agentic step, which is what you want auditable, retryable and logged as a task.
+Why the evidence arrives in ``conf`` rather than being gathered here: a task cannot ask
+the questions. Task code runs under the Task SDK and reaches the scheduler over the Task
+Execution API, with no metadata database access (``create_session()`` raises
+``RuntimeError: Session must be set before!``) and no credential of its own for the REST
+API. The plugin, sitting in the api-server, has the caller's credential and so can read
+that person's logs with that person's permissions. It does the collecting; this dag is
+purely the agentic step, which is the part worth having auditable, retryable and logged.
+
+What gets sent to the model: the task's log tail, its state, operator, try count,
+duration, pool, queue and hostname, and the states of its sibling tasks. That is a
+deliberate, bounded payload rather than the whole run -- but it is task log content, and
+it leaves your deployment for whichever provider ``airflow_os_llm_model_id`` names. If
+that is not acceptable where you work, point the connection at a self-hosted model or
+leave it unset, in which case Clippy reports the evidence and says the model was never
+called.
 
 Configure the model with two Airflow Variables, both optional:
 
